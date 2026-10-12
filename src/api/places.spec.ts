@@ -11,62 +11,65 @@ describe('parsePlaceCandidatesResponse', () => {
   it('parses the app-owned server response', () => {
     expect(
       parsePlaceCandidatesResponse({
-        results: [
+        status: 'partial',
+        stores: [
           {
-            itemId: 'item-1',
-            candidates: [
-              {
-                id: 'place-1',
-                name: 'Sprouts Farmers Market',
-                location: {
-                  latitude: 34.027,
-                  longitude: -118.393,
-                },
-              },
-            ],
+            placeId: 'place-1',
+            name: 'Sprouts Farmers Market',
+            location: {
+              latitude: 34.027,
+              longitude: -118.393,
+            },
+            itemIds: ['item-1', 'item-2'],
           },
         ],
-        unsupportedItemIds: ['item-2'],
+        categoryFailures: [
+          { category: 'pharmacy', code: 'provider-error' },
+        ],
       }),
     ).toEqual({
-      results: [
+      status: 'partial',
+      stores: [
         {
-          itemId: 'item-1',
-          candidates: [
-            {
-              id: 'place-1',
-              name: 'Sprouts Farmers Market',
-              location: {
-                latitude: 34.027,
-                longitude: -118.393,
-              },
-            },
-          ],
+          placeId: 'place-1',
+          name: 'Sprouts Farmers Market',
+          location: {
+            latitude: 34.027,
+            longitude: -118.393,
+          },
+          itemIds: ['item-1', 'item-2'],
         },
       ],
-      unsupportedItemIds: ['item-2'],
+      categoryFailures: [
+        { category: 'pharmacy', code: 'provider-error' },
+      ],
     });
   });
 
   it.each([
     null,
     {},
-    { results: [], unsupportedItemIds: [42] },
+    { status: 'complete', stores: [], categoryFailures: [42] },
     {
-      results: [
+      status: 'partial',
+      stores: [],
+      categoryFailures: [
+        { category: 'unknown-store', code: 'provider-error' },
+      ],
+    },
+    {
+      status: 'complete',
+      stores: [
         {
-          itemId: 'item-1',
-          candidates: [
-            {
-              id: 'place-1',
-              name: 'Market',
-              location: { latitude: '34', longitude: -118.393 },
-            },
-          ],
+          placeId: 'place-1',
+          name: 'Market',
+          location: { latitude: '34', longitude: -118.393 },
+          itemIds: ['item-1'],
         },
       ],
-      unsupportedItemIds: [],
+      categoryFailures: [],
     },
+    { status: 'partial', stores: [], categoryFailures: [] },
   ])('rejects an invalid response: %j', (response) => {
     expect(() => parsePlaceCandidatesResponse(response)).toThrow();
   });
@@ -78,8 +81,9 @@ describe('findPlaceCandidates', () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          results: [],
-          unsupportedItemIds: [],
+          status: 'complete',
+          stores: [],
+          categoryFailures: [],
         }),
         {
           headers: { 'Content-Type': 'application/json' },
@@ -90,13 +94,21 @@ describe('findPlaceCandidates', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const request = {
-      items: [{ id: 'item-1', text: 'Milk' }],
+      items: [
+        {
+          id: 'item-1',
+          revision: 2,
+          taxonomyVersion: 1 as const,
+          categories: ['grocery-store'] as ['grocery-store'],
+        },
+      ],
       location: { latitude: 34.027, longitude: -118.393 },
     };
 
     await expect(findPlaceCandidates(request)).resolves.toEqual({
-      results: [],
-      unsupportedItemIds: [],
+      status: 'complete',
+      stores: [],
+      categoryFailures: [],
     });
     expect(fetchMock).toHaveBeenCalledWith(
       'http://192.168.1.23:3000/places/candidates',
@@ -105,5 +117,66 @@ describe('findPlaceCandidates', () => {
         body: JSON.stringify(request),
       }),
     );
+  });
+
+  it('returns category-level failures from an HTTP 200 response', async () => {
+    vi.stubEnv('EXPO_PUBLIC_API_BASE_URL', 'http://192.168.1.23:3000');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            status: 'failed',
+            stores: [],
+            categoryFailures: [
+              { category: 'pharmacy', code: 'provider-error' },
+            ],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(
+      findPlaceCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: 1,
+            categories: ['pharmacy'],
+          },
+        ],
+        location: { latitude: 34.027, longitude: -118.393 },
+      }),
+    ).resolves.toEqual({
+      status: 'failed',
+      stores: [],
+      categoryFailures: [
+        { category: 'pharmacy', code: 'provider-error' },
+      ],
+    });
+  });
+
+  it('rejects non-200 transport failures', async () => {
+    vi.stubEnv('EXPO_PUBLIC_API_BASE_URL', 'http://192.168.1.23:3000');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(null, { status: 503 })),
+    );
+
+    await expect(
+      findPlaceCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: 1,
+            categories: ['pharmacy'],
+          },
+        ],
+        location: { latitude: 34.027, longitude: -118.393 },
+      }),
+    ).rejects.toThrow('places server request failed with status 503');
   });
 });

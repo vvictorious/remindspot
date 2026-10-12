@@ -86,3 +86,26 @@ Classification is foreground-only orchestration and remains separate from
 Places discovery, geofencing, and notifications. Places requests depend only
 on the item ID/text projection, so classification-only state changes do not
 start discovery and classification outcomes do not select or rank places.
+
+## Classification-driven Places contract — 2026-10-12
+
+### Treat classifications as the only source of store categories
+
+`POST /places/candidates` accepts only current classified items. Each item
+includes its ID, revision, taxonomy version, and one or more destination
+categories. The API rejects unknown categories, duplicate categories, stale
+taxonomy versions, and duplicate item IDs. Places no longer derives categories
+from item text.
+
+The response is store-centric. Stores are keyed by Google Place ID and include
+the IDs of every item whose categories produced that store. Category searches
+are isolated: successful stores remain in the response when another category
+fails. The `status` field is `complete`, `partial`, or `failed`, and
+`categoryFailures` identifies each failed category with a provider-neutral
+error code.
+
+This intentionally breaks the earlier item-centric contract. Milestone 5.2
+consumers must send the classified-item projection instead of item text and
+read `stores`/`categoryFailures` instead of `results`/`unsupportedItemIds`.
+Discovery debounce, caching, geofencing, ranking, and no-destination UI remain
+out of scope; the planned discovery debounce is 400 ms.

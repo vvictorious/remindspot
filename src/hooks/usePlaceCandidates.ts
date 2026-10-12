@@ -1,5 +1,7 @@
+import NetInfo from '@react-native-community/netinfo';
 import * as Location from 'expo-location';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { AppState } from 'react-native';
 
 import { findPlaceCandidates } from '../api/places';
 import type { Item } from '../models/Item';
@@ -22,9 +24,35 @@ export function usePlaceCandidates({
     () => parsePlaceRequestItemsSignature(requestItemsSignature),
     [requestItemsSignature],
   );
+  const [isForeground, setIsForeground] = useState(
+    AppState.currentState === 'active',
+  );
+  const [isDefinitelyOffline, setIsDefinitelyOffline] = useState(false);
 
   useEffect(() => {
-    if (isLoadingItems || requestItems.length === 0) {
+    const appStateSubscription = AppState.addEventListener(
+      'change',
+      (nextState) => setIsForeground(nextState === 'active'),
+    );
+    const unsubscribeNetInfo = NetInfo.addEventListener((state) => {
+      setIsDefinitelyOffline(
+        state.isConnected === false || state.isInternetReachable === false,
+      );
+    });
+
+    return () => {
+      appStateSubscription.remove();
+      unsubscribeNetInfo();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      isLoadingItems ||
+      !isForeground ||
+      isDefinitelyOffline ||
+      requestItems.length === 0
+    ) {
       return;
     }
 
@@ -71,21 +99,16 @@ export function usePlaceCandidates({
           return;
         }
 
-        const itemsById = new Map(requestItems.map((item) => [item.id, item]));
-
-        for (const { itemId, candidates } of result.results) {
-          const itemText = itemsById.get(itemId)?.text ?? 'Unknown item';
-          const candidateNames =
-            candidates.map(({ name }) => name).join(', ') || '(none)';
-
+        for (const store of result.stores) {
           console.info(
-            `[places] "${itemText}" (${itemId})\nCandidates: ${candidateNames}`,
+            `[places] ${store.name} (${store.placeId}) applies to items: ${store.itemIds.join(', ')}`,
           );
         }
 
-        for (const itemId of result.unsupportedItemIds) {
-          const itemText = itemsById.get(itemId)?.text ?? 'Unknown item';
-          console.info(`[places] Unsupported item: "${itemText}" (${itemId})`);
+        for (const failure of result.categoryFailures) {
+          console.warn(
+            `[places] Candidate lookup failed for category: ${failure.category}`,
+          );
         }
       } catch (error) {
         if (abortController.signal.aborted) {
@@ -105,5 +128,10 @@ export function usePlaceCandidates({
       isActive = false;
       abortController.abort();
     };
-  }, [isLoadingItems, requestItems]);
+  }, [
+    isDefinitelyOffline,
+    isForeground,
+    isLoadingItems,
+    requestItems,
+  ]);
 }
