@@ -52,6 +52,94 @@ describe('PlacesService', () => {
     });
   });
 
+  it('shares one provider request across items with the same category', async () => {
+    const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([
+      {
+        id: 'google-place-1',
+        name: 'Shared Market',
+        location: { latitude: 34.051, longitude: -118.251 },
+      },
+    ]);
+    const { service } = await createService(search);
+
+    await expect(
+      service.findCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+          {
+            id: 'item-2',
+            revision: 4,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+        ],
+        location,
+      }),
+    ).resolves.toEqual({
+      status: 'complete',
+      stores: [
+        {
+          placeId: 'google-place-1',
+          name: 'Shared Market',
+          location: { latitude: 34.051, longitude: -118.251 },
+          itemIds: ['item-1', 'item-2'],
+        },
+      ],
+      categoryFailures: [],
+    });
+    expect(search).toHaveBeenCalledOnce();
+    expect(search).toHaveBeenCalledWith({
+      categories: ['grocery-store'],
+      location,
+    });
+  });
+
+  it('normalizes duplicate provider results by Google Place ID', async () => {
+    const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([
+      {
+        id: 'google-place-1',
+        name: 'Market',
+        location: { latitude: 34.051, longitude: -118.251 },
+      },
+      {
+        id: 'google-place-1',
+        name: 'Market',
+        location: { latitude: 34.051, longitude: -118.251 },
+      },
+    ]);
+    const { service } = await createService(search);
+
+    await expect(
+      service.findCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+        ],
+        location,
+      }),
+    ).resolves.toEqual({
+      status: 'complete',
+      stores: [
+        {
+          placeId: 'google-place-1',
+          name: 'Market',
+          location: { latitude: 34.051, longitude: -118.251 },
+          itemIds: ['item-1'],
+        },
+      ],
+      categoryFailures: [],
+    });
+  });
+
   it('merges shared Google places and associates all applicable item IDs', async () => {
     const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([
       {

@@ -227,6 +227,82 @@ describe('API (e2e)', () => {
     expect(search).toHaveBeenCalledTimes(2);
   });
 
+  it('returns HTTP 200 with successful stores and category failures', async () => {
+    search.mockReset();
+    search.mockImplementation(({ categories }) =>
+      categories[0] === 'pharmacy'
+        ? Promise.reject(new Error('provider failed'))
+        : Promise.resolve([
+            {
+              id: 'market-1',
+              name: 'Neighborhood Market',
+              location: { latitude: 34.001, longitude: -118.401 },
+            },
+          ]),
+    );
+
+    await request(app.getHttpServer())
+      .post('/places/candidates')
+      .send({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+          {
+            id: 'item-2',
+            revision: 2,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['pharmacy'],
+          },
+        ],
+        location: { latitude: 34, longitude: -118.4 },
+      })
+      .expect(200)
+      .expect({
+        status: 'partial',
+        stores: [
+          {
+            placeId: 'market-1',
+            name: 'Neighborhood Market',
+            location: { latitude: 34.001, longitude: -118.401 },
+            itemIds: ['item-1'],
+          },
+        ],
+        categoryFailures: [{ category: 'pharmacy', code: 'provider-error' }],
+      });
+  });
+
+  it('returns HTTP 200 when every category provider request fails', async () => {
+    search.mockReset();
+    search.mockRejectedValue(new Error('provider failed'));
+
+    await request(app.getHttpServer())
+      .post('/places/candidates')
+      .send({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store', 'pharmacy'],
+          },
+        ],
+        location: { latitude: 34, longitude: -118.4 },
+      })
+      .expect(200)
+      .expect({
+        status: 'failed',
+        stores: [],
+        categoryFailures: [
+          { category: 'grocery-store', code: 'provider-error' },
+          { category: 'pharmacy', code: 'provider-error' },
+        ],
+      });
+  });
+
   it.each([
     { items: [], location: { latitude: 34, longitude: -118.4 } },
     {
