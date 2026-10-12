@@ -134,5 +134,37 @@ its results from applying.
 
 Persistent caching, TTL and eviction policy, location bucketing, whether
 partial retries should query only failed categories, and AsyncStorage schema
-remain decisions for Milestone 5.5. Geofencing, notifications, ranking, and
+were deferred to Milestone 5.5. Geofencing, notifications, ranking, and
 no-destination UI remain out of scope.
+
+## Places discovery efficiency — 2026-10-12
+
+### Measure provider requests before adding caching
+
+Each actual Google Places request emits one server log event with its
+destination categories, process-local request sequence number, success state,
+and duration. The event excludes request coordinates, item IDs, item text,
+place results, and provider error payloads. Instrumentation wraps the existing
+request and does not perform an additional provider call.
+
+The classification taxonomy is the request boundary: only its 10 destination
+categories are accepted, and categories shared by multiple items still produce
+one provider request. No additional per-discovery category limit is imposed,
+because it would reject otherwise valid classified items without materially
+reducing the bounded worst case. Google API quotas and provider-request usage
+monitoring are the preferred cost safeguards.
+
+Persistent caching, AsyncStorage discovery storage, and a new in-memory cache
+are deferred, as are additional request limits. Existing request-level category
+deduplication, the mobile 400 ms debounce, unchanged-input suppression, and the
+200 m movement threshold already prevent the clearest redundant calls. There
+is not yet production evidence for a cache TTL, location key, invalidation
+policy, or enough repeated traffic to justify the consistency and privacy
+costs of another cache.
+
+Explicit retries currently resend all categories. Retrying only failed
+categories would reduce a partial retry from all unique categories to only the
+failed-category count, which is material when few categories fail. It is
+deferred because correctly merging retried stores and item associations into
+the prior partial result requires a new retry/merge contract; provider logs
+will show whether partial failures occur often enough to prioritize that work.

@@ -2,6 +2,7 @@ import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
 
 import { DESTINATION_TAXONOMY_VERSION } from '../classification/classification-response';
+import { DESTINATION_CATEGORIES } from './destination-category';
 import { PLACES_PROVIDER, PlacesProvider } from './places-provider';
 import { PlacesService } from './places.service';
 
@@ -97,6 +98,26 @@ describe('PlacesService', () => {
       categories: ['grocery-store'],
       location,
     });
+  });
+
+  it('queries every category in the validated taxonomy', async () => {
+    const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([]);
+    const { service } = await createService(search);
+
+    await expect(
+      service.findCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: DESTINATION_CATEGORIES,
+          },
+        ],
+        location,
+      }),
+    ).resolves.toMatchObject({ status: 'complete' });
+    expect(search).toHaveBeenCalledTimes(DESTINATION_CATEGORIES.length);
   });
 
   it('normalizes duplicate provider results by Google Place ID', async () => {

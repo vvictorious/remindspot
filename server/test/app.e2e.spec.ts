@@ -14,6 +14,7 @@ import {
   DESTINATION_TAXONOMY_VERSION,
   ItemClassificationResponse,
 } from '../src/classification/classification-response';
+import { DESTINATION_CATEGORIES } from '../src/places/destination-category';
 import { PLACES_PROVIDER, PlacesProvider } from '../src/places/places-provider';
 
 describe('API (e2e)', () => {
@@ -179,6 +180,33 @@ describe('API (e2e)', () => {
       .expect(400);
 
     expect(search).not.toHaveBeenCalled();
+  });
+
+  it('accepts every category in the validated taxonomy', async () => {
+    search.mockClear();
+    search.mockResolvedValue([]);
+
+    await request(app.getHttpServer())
+      .post('/places/candidates')
+      .send({
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: DESTINATION_CATEGORIES,
+          },
+        ],
+        location: { latitude: 34, longitude: -118.4 },
+      })
+      .expect(200)
+      .expect({
+        status: 'complete',
+        stores: [],
+        categoryFailures: [],
+      });
+
+    expect(search).toHaveBeenCalledTimes(DESTINATION_CATEGORIES.length);
   });
 
   it('returns shared stores with every applicable item ID', async () => {

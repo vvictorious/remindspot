@@ -307,11 +307,18 @@ describe('PlaceDiscoveryCoordinator', () => {
       })
       .mockReturnValueOnce(retryResponse.promise);
     const harness = createHarness({ discover });
-    harness.update([groceryItem]);
+    harness.update([
+      { ...groceryItem, categories: ['grocery-store', 'pharmacy'] },
+    ]);
     await advance();
 
     harness.coordinator.retry();
     await advance(0);
+    expect(harness.discover).toHaveBeenCalledTimes(2);
+    expect(harness.discover.mock.calls[1][0].items[0].categories).toEqual([
+      'grocery-store',
+      'pharmacy',
+    ]);
     expect(harness.states.at(-1)).toMatchObject({
       status: 'loading',
       stores: [{ placeId: 'place-1' }],

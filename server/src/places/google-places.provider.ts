@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -36,6 +37,9 @@ interface GooglePlace {
 
 @Injectable()
 export class GooglePlacesProvider implements PlacesProvider {
+  private readonly logger = new Logger(GooglePlacesProvider.name);
+  private requestCount = 0;
+
   constructor(private readonly config: ConfigService) {}
 
   async search(
@@ -55,68 +59,84 @@ export class GooglePlacesProvider implements PlacesProvider {
       ),
     ];
 
-    let response: Response;
+    const requestCount = ++this.requestCount;
+    const startedAt = performance.now();
+    let success = false;
+
     try {
-      response = await fetch(GOOGLE_NEARBY_SEARCH_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey,
-          'X-Goog-FieldMask': GOOGLE_PLACES_FIELD_MASK,
-        },
-        body: JSON.stringify({
-          includedPrimaryTypes,
-          maxResultCount: NEARBY_CANDIDATE_LIMIT,
-          rankPreference: 'DISTANCE',
-          locationRestriction: {
-            circle: {
-              center: request.location,
-              radius: NEARBY_SEARCH_RADIUS_METERS,
-            },
+      let response: Response;
+      try {
+        response = await fetch(GOOGLE_NEARBY_SEARCH_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': GOOGLE_PLACES_FIELD_MASK,
           },
-        }),
-      });
-    } catch {
-      throw new BadGatewayException('Google Places request failed');
-    }
-
-    if (!response.ok) {
-      throw new BadGatewayException(
-        `Google Places request failed with status ${response.status}`,
-      );
-    }
-
-    let body: GoogleNearbySearchResponse;
-    try {
-      body = (await response.json()) as GoogleNearbySearchResponse;
-    } catch {
-      throw new BadGatewayException(
-        'Google Places returned an invalid response',
-      );
-    }
-
-    return (body.places ?? []).flatMap((place) => {
-      const { id, displayName, location } = place;
-
-      if (
-        !id ||
-        !displayName?.text ||
-        typeof location?.latitude !== 'number' ||
-        typeof location.longitude !== 'number'
-      ) {
-        return [];
+          body: JSON.stringify({
+            includedPrimaryTypes,
+            maxResultCount: NEARBY_CANDIDATE_LIMIT,
+            rankPreference: 'DISTANCE',
+            locationRestriction: {
+              circle: {
+                center: request.location,
+                radius: NEARBY_SEARCH_RADIUS_METERS,
+              },
+            },
+          }),
+        });
+      } catch {
+        throw new BadGatewayException('Google Places request failed');
       }
 
-      return [
-        {
-          id,
-          name: displayName.text,
-          location: {
-            latitude: location.latitude,
-            longitude: location.longitude,
+      if (!response.ok) {
+        throw new BadGatewayException(
+          `Google Places request failed with status ${response.status}`,
+        );
+      }
+
+      let body: GoogleNearbySearchResponse;
+      try {
+        body = (await response.json()) as GoogleNearbySearchResponse;
+      } catch {
+        throw new BadGatewayException(
+          'Google Places returned an invalid response',
+        );
+      }
+
+      const candidates = (body.places ?? []).flatMap((place) => {
+        const { id, displayName, location } = place;
+
+        if (
+          !id ||
+          !displayName?.text ||
+          typeof location?.latitude !== 'number' ||
+          typeof location.longitude !== 'number'
+        ) {
+          return [];
+        }
+
+        return [
+          {
+            id,
+            name: displayName.text,
+            location: {
+              latitude: location.latitude,
+              longitude: location.longitude,
+            },
           },
-        },
-      ];
-    });
+        ];
+      });
+      success = true;
+      return candidates;
+    } finally {
+      this.logger.log({
+        event: 'google_places.provider_request',
+        categories: [...request.categories],
+        requestCount,
+        success,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+    }
   }
 }

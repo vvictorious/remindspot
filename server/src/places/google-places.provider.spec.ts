@@ -1,9 +1,10 @@
 import {
   BadGatewayException,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DestinationCategory } from './destination-category';
 import {
@@ -15,7 +16,15 @@ import {
 } from './google-places.provider';
 
 describe('GooglePlacesProvider', () => {
+  const log = vi.fn<(message: unknown) => void>();
+
+  beforeEach(() => {
+    log.mockClear();
+    vi.spyOn(Logger.prototype, 'log').mockImplementation(log);
+  });
+
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -115,15 +124,14 @@ describe('GooglePlacesProvider', () => {
       }),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('does not expose Google error payloads', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn<typeof fetch>()
-        .mockResolvedValue(new Response('credential details', { status: 403 })),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('credential details', { status: 403 }));
+    vi.stubGlobal('fetch', fetchMock);
     const provider = new GooglePlacesProvider(
       new ConfigService({ GOOGLE_PLACES_API_KEY: 'test-key' }),
     );
@@ -136,5 +144,94 @@ describe('GooglePlacesProvider', () => {
     ).rejects.toEqual(
       new BadGatewayException('Google Places request failed with status 403'),
     );
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledOnce();
+    const logEntry = log.mock.calls[0][0] as Record<string, unknown>;
+    expect(logEntry).toMatchObject({
+      event: 'google_places.provider_request',
+      categories: ['grocery-store'],
+      requestCount: 1,
+      success: false,
+    });
+    expect(typeof logEntry.durationMs).toBe('number');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('credential details');
+  });
+
+  it('logs one safe observation per successful provider request', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          places: [
+            {
+              id: 'private-place-id',
+              displayName: { text: 'Private Place Name' },
+              location: { latitude: 11.111111, longitude: -22.222222 },
+            },
+          ],
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new GooglePlacesProvider(
+      new ConfigService({ GOOGLE_PLACES_API_KEY: 'test-key' }),
+    );
+
+    await provider.search({
+      categories: ['pharmacy'],
+      location: { latitude: 12.345678, longitude: -98.765432 },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledOnce();
+    const logEntry = log.mock.calls[0][0] as Record<string, unknown>;
+    expect(logEntry).toMatchObject({
+      event: 'google_places.provider_request',
+      categories: ['pharmacy'],
+      requestCount: 1,
+      success: true,
+    });
+    expect(typeof logEntry.durationMs).toBe('number');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('12.345678');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('-98.765432');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-place-id');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('Private Place Name');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('11.111111');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('-22.222222');
+  });
+
+  it('increments the request count without adding provider requests', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify({ places: [] }))),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new GooglePlacesProvider(
+      new ConfigService({ GOOGLE_PLACES_API_KEY: 'test-key' }),
+    );
+
+    await provider.search({
+      categories: ['grocery-store'],
+      location: { latitude: 34, longitude: -118.4 },
+    });
+    await provider.search({
+      categories: ['pharmacy'],
+      location: { latitude: 34, longitude: -118.4 },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledTimes(2);
+    expect(log.mock.calls.map(([entry]) => entry)).toEqual([
+      expect.objectContaining({
+        categories: ['grocery-store'],
+        requestCount: 1,
+        success: true,
+      }),
+      expect.objectContaining({
+        categories: ['pharmacy'],
+        requestCount: 2,
+        success: true,
+      }),
+    ]);
   });
 });
