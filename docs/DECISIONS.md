@@ -109,3 +109,30 @@ consumers must send the classified-item projection instead of item text and
 read `stores`/`categoryFailures` instead of `results`/`unsupportedItemIds`.
 Discovery debounce, caching, geofencing, ranking, and no-destination UI remain
 out of scope; the planned discovery debounce is 400 ms.
+
+## Places discovery lifecycle — 2026-10-12
+
+### Coordinate foreground discovery in memory
+
+A focused mobile coordinator owns Places discovery scheduling, cancellation,
+freshness, and transient result state. Eligible classification changes clear
+obsolete store associations immediately and are then coalesced with a 400 ms
+debounce. Request snapshots include the canonical item IDs, revisions,
+categories, taxonomy versions, and a location identity. Late completions must
+match the current snapshot even when transport cancellation does not stop them.
+
+Discovery state is separate from persisted items and distinguishes loading,
+complete, partial, failed category discovery, and transport errors. Partial
+responses retain their successful store-to-item associations and can be
+retried explicitly; there is no automatic discovery retry loop.
+
+Unchanged item inputs are deduplicated. Location identities reuse the previous
+request anchor while movement remains under approximately 200 meters, avoiding
+GPS-drift refetches without defining a durable location or cache policy.
+Background and definitive-offline transitions cancel pending work and prevent
+its results from applying.
+
+Persistent caching, TTL and eviction policy, location bucketing, whether
+partial retries should query only failed categories, and AsyncStorage schema
+remain decisions for Milestone 5.5. Geofencing, notifications, ranking, and
+no-destination UI remain out of scope.

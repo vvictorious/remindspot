@@ -174,6 +174,25 @@ describe('place item projection', () => {
     expect(createPlaceRequestItemsSignature([])).not.toBe(initial);
   });
 
+  it('keeps the signature stable when item or category order changes', () => {
+    const first = classify(makeItem(), [
+      'grocery-store',
+      'convenience-store',
+    ]);
+    const second = classify(
+      { ...makeItem(), id: 'item-2' },
+      ['pharmacy'],
+    );
+    const reorderedFirst = classify(makeItem(), [
+      'convenience-store',
+      'grocery-store',
+    ]);
+
+    expect(
+      createPlaceRequestItemsSignature([second, reorderedFirst]),
+    ).toBe(createPlaceRequestItemsSignature([first, second]));
+  });
+
   it('removes eligibility immediately after an item edit or deletion', () => {
     const classified = classify(makeItem(), ['grocery-store']);
     const [edited] = updateItemText(

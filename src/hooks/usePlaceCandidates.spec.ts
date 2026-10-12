@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DESTINATION_TAXONOMY_VERSION } from '../models/Classification';
 import type { DestinationCategory } from '../models/Classification';
 import type { Item } from '../models/Item';
-import { usePlaceCandidates } from './usePlaceCandidates';
+import { PLACE_DISCOVERY_DEBOUNCE_MS } from './place-discovery-coordinator';
+import {
+  usePlaceCandidates,
+  type UsePlaceCandidatesResult,
+} from './usePlaceCandidates';
 
 const mocks = vi.hoisted(() => ({
   appState: 'active',
@@ -68,10 +72,14 @@ vi.mock('../api/places', () => ({
 type HarnessProps = {
   isLoadingItems: boolean;
   items: readonly Item[];
+  onResult?: (result: UsePlaceCandidatesResult) => void;
 };
 
 function Harness(props: HarnessProps) {
-  usePlaceCandidates(props);
+  const result = usePlaceCandidates(props);
+  React.useEffect(() => {
+    props.onResult?.(result);
+  }, [props, result]);
   return null;
 }
 
@@ -129,10 +137,18 @@ async function flushEffects() {
   });
 }
 
+async function advanceDiscovery() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(PLACE_DISCOVERY_DEBOUNCE_MS);
+  });
+  await flushEffects();
+}
+
 describe('usePlaceCandidates', () => {
   let renderer: TestRenderer.ReactTestRenderer | undefined;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     mocks.appState = 'active';
     mocks.appStateListener = undefined;
@@ -155,6 +171,7 @@ describe('usePlaceCandidates', () => {
       act(() => renderer?.unmount());
       renderer = undefined;
     }
+    vi.useRealTimers();
   });
 
   async function render(props: HarnessProps) {
@@ -183,6 +200,7 @@ describe('usePlaceCandidates', () => {
     expect(mocks.findPlaceCandidates).not.toHaveBeenCalled();
 
     await update({ isLoadingItems: false, items: [classified] });
+    await advanceDiscovery();
 
     expect(mocks.findPlaceCandidates).toHaveBeenCalledWith(
       {
@@ -206,7 +224,45 @@ describe('usePlaceCandidates', () => {
     expect(mocks.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
 
     await update({ isLoadingItems: false, items: [item] });
+    await advanceDiscovery();
     expect(mocks.findPlaceCandidates).toHaveBeenCalledOnce();
+  });
+
+  it('exposes store-centric partial results and their item associations', async () => {
+    let latestResult: UsePlaceCandidatesResult | undefined;
+    mocks.findPlaceCandidates.mockResolvedValue({
+      status: 'partial',
+      stores: [
+        {
+          placeId: 'place-1',
+          name: 'Market',
+          location: { latitude: 34.027, longitude: -118.393 },
+          itemIds: ['item-1', 'item-2'],
+        },
+      ],
+      categoryFailures: [
+        { category: 'pharmacy', code: 'provider-error' },
+      ],
+    });
+
+    await render({
+      isLoadingItems: false,
+      items: [classifiedItem(['grocery-store', 'pharmacy'])],
+      onResult: (result) => {
+        latestResult = result;
+      },
+    });
+    await advanceDiscovery();
+
+    expect(latestResult).toMatchObject({
+      status: 'partial',
+      stores: [{ placeId: 'place-1', itemIds: ['item-1', 'item-2'] }],
+      categoryFailures: [
+        { category: 'pharmacy', code: 'provider-error' },
+      ],
+      canRetry: true,
+      retry: expect.any(Function),
+    });
   });
 
   it('waits until the app returns to the foreground', async () => {
@@ -217,6 +273,7 @@ describe('usePlaceCandidates', () => {
 
     await act(async () => mocks.appStateListener?.('active'));
     await flushEffects();
+    await advanceDiscovery();
     expect(mocks.findPlaceCandidates).toHaveBeenCalledOnce();
   });
 
@@ -242,6 +299,7 @@ describe('usePlaceCandidates', () => {
       }),
     );
     await flushEffects();
+    await advanceDiscovery();
     expect(mocks.findPlaceCandidates).toHaveBeenCalledOnce();
   });
 
@@ -258,6 +316,7 @@ describe('usePlaceCandidates', () => {
     );
     const item = classifiedItem();
     await render({ isLoadingItems: false, items: [item] });
+    await advanceDiscovery();
     expect(requestSignal?.aborted).toBe(false);
 
     await update({
@@ -281,14 +340,17 @@ describe('usePlaceCandidates', () => {
       isLoadingItems: false,
       items: [classifiedItem(['grocery-store'])],
     });
+    await advanceDiscovery();
 
     await update({
       isLoadingItems: false,
       items: [classifiedItem(['convenience-store'])],
     });
 
-    expect(signals).toHaveLength(2);
+    expect(signals).toHaveLength(1);
     expect(signals[0].aborted).toBe(true);
+    await advanceDiscovery();
+    expect(signals).toHaveLength(2);
     expect(signals[1].aborted).toBe(false);
     expect(mocks.findPlaceCandidates.mock.calls[1][0]).toEqual(
       expect.objectContaining({

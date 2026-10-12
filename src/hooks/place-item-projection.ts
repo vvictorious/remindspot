@@ -1,7 +1,12 @@
 import type { PlaceCandidatesRequest } from '../api/places';
+import { DESTINATION_CATEGORIES } from '../models/Classification';
 import type { Item } from '../models/Item';
 
 export type PlaceRequestItem = PlaceCandidatesRequest['items'][number];
+
+const categoryOrder = new Map(
+  DESTINATION_CATEGORIES.map((category, index) => [category, index]),
+);
 
 function toPlaceRequestItem(item: Item): PlaceRequestItem | null {
   const { classification } = item;
@@ -24,12 +29,22 @@ function toPlaceRequestItem(item: Item): PlaceRequestItem | null {
 export function createPlaceRequestItemsSignature(
   items: readonly Item[],
 ): string {
-  return JSON.stringify(
-    items.flatMap((item) => {
+  const requestItems = items
+    .flatMap((item) => {
       const requestItem = toPlaceRequestItem(item);
       return requestItem ? [requestItem] : [];
-    }),
-  );
+    })
+    .map((item) => ({
+      ...item,
+      categories: [...item.categories].sort(
+        (left, right) =>
+          (categoryOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
+          (categoryOrder.get(right) ?? Number.MAX_SAFE_INTEGER),
+      ) as PlaceRequestItem['categories'],
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+
+  return JSON.stringify(requestItems);
 }
 
 export function parsePlaceRequestItemsSignature(
