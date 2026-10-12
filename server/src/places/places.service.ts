@@ -1,13 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
 
+import { DESTINATION_TAXONOMY_VERSION } from '../classification/classification-response';
 import type { DestinationCategory } from './destination-category';
 import { PLACES_PROVIDER } from './places-provider';
-import type { PlaceCandidate, PlacesProvider } from './places-provider';
+import type { PlacesProvider } from './places-provider';
 
 export interface FindPlaceCandidatesRequest {
   items: readonly {
     id: string;
-    text: string;
+    revision: number;
+    taxonomyVersion: typeof DESTINATION_TAXONOMY_VERSION;
+    categories: readonly DestinationCategory[];
   }[];
   location: {
     latitude: number;
@@ -15,20 +18,24 @@ export interface FindPlaceCandidatesRequest {
   };
 }
 
-export interface FindPlaceCandidatesResult {
-  results: readonly {
-    itemId: string;
-    candidates: readonly PlaceCandidate[];
-  }[];
-  unsupportedItemIds: readonly string[];
-}
+export type PlaceDiscoveryStatus = 'complete' | 'partial' | 'failed';
 
-const ITEM_CATEGORIES: Readonly<Record<string, DestinationCategory>> = {
-  milk: 'grocery-store',
-  bananas: 'grocery-store',
-  'cortisone cream': 'pharmacy',
-  'dog food': 'pet-store',
-};
+export interface FindPlaceCandidatesResult {
+  status: PlaceDiscoveryStatus;
+  stores: readonly {
+    placeId: string;
+    name: string;
+    location: {
+      latitude: number;
+      longitude: number;
+    };
+    itemIds: readonly string[];
+  }[];
+  categoryFailures: readonly {
+    category: DestinationCategory;
+    code: 'provider-error';
+  }[];
+}
 
 @Injectable()
 export class PlacesService {
@@ -40,43 +47,82 @@ export class PlacesService {
   async findCandidates(
     request: FindPlaceCandidatesRequest,
   ): Promise<FindPlaceCandidatesResult> {
-    const supportedItems: {
-      itemId: string;
-      category: DestinationCategory;
-    }[] = [];
-    const categories = new Set<DestinationCategory>();
-    const unsupportedItemIds: string[] = [];
-
+    const itemIdsByCategory = new Map<DestinationCategory, Set<string>>();
     for (const item of request.items) {
-      const category = ITEM_CATEGORIES[item.text.trim().toLowerCase()];
-
-      if (category) {
-        supportedItems.push({ itemId: item.id, category });
-        categories.add(category);
-      } else {
-        unsupportedItemIds.push(item.id);
+      for (const category of item.categories) {
+        const itemIds = itemIdsByCategory.get(category) ?? new Set<string>();
+        itemIds.add(item.id);
+        itemIdsByCategory.set(category, itemIds);
       }
     }
 
-    const candidatesByCategory = new Map(
-      await Promise.all(
-        [...categories].map(async (category) => {
+    const categoryResults = await Promise.all(
+      [...itemIdsByCategory].map(async ([category, itemIds]) => {
+        try {
           const candidates = await this.provider.search({
             categories: [category],
             location: request.location,
           });
 
-          return [category, candidates] as const;
-        }),
-      ),
+          return { category, itemIds, candidates, succeeded: true } as const;
+        } catch {
+          return { category, itemIds, succeeded: false } as const;
+        }
+      }),
     );
 
+    const storesByPlaceId = new Map<
+      string,
+      {
+        placeId: string;
+        name: string;
+        location: { latitude: number; longitude: number };
+        itemIds: Set<string>;
+      }
+    >();
+    const categoryFailures: {
+      category: DestinationCategory;
+      code: 'provider-error';
+    }[] = [];
+
+    for (const result of categoryResults) {
+      if (!result.succeeded) {
+        categoryFailures.push({
+          category: result.category,
+          code: 'provider-error',
+        });
+        continue;
+      }
+
+      for (const candidate of result.candidates) {
+        const store = storesByPlaceId.get(candidate.id) ?? {
+          placeId: candidate.id,
+          name: candidate.name,
+          location: candidate.location,
+          itemIds: new Set<string>(),
+        };
+        for (const itemId of result.itemIds) {
+          store.itemIds.add(itemId);
+        }
+        storesByPlaceId.set(candidate.id, store);
+      }
+    }
+
+    const successfulCategoryCount =
+      categoryResults.length - categoryFailures.length;
+
     return {
-      results: supportedItems.map(({ itemId, category }) => ({
-        itemId,
-        candidates: candidatesByCategory.get(category) ?? [],
+      status:
+        categoryFailures.length === 0
+          ? 'complete'
+          : successfulCategoryCount === 0
+            ? 'failed'
+            : 'partial',
+      stores: [...storesByPlaceId.values()].map((store) => ({
+        ...store,
+        itemIds: [...store.itemIds],
       })),
-      unsupportedItemIds,
+      categoryFailures,
     };
   }
 }

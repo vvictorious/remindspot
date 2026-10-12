@@ -1,11 +1,8 @@
 import { Test } from '@nestjs/testing';
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  PlaceCandidate,
-  PLACES_PROVIDER,
-  PlacesProvider,
-} from './places-provider';
+import { DESTINATION_TAXONOMY_VERSION } from '../classification/classification-response';
+import { PLACES_PROVIDER, PlacesProvider } from './places-provider';
 import { PlacesService } from './places.service';
 
 describe('PlacesService', () => {
@@ -21,150 +18,156 @@ describe('PlacesService', () => {
     return { search, service: module.get(PlacesService) };
   }
 
-  it.each([
-    ['Milk', 'grocery-store'],
-    ['  MiLk  ', 'grocery-store'],
-    ['Bananas', 'grocery-store'],
-    ['  BANANAS  ', 'grocery-store'],
-    ['Cortisone cream', 'pharmacy'],
-    ['  CORTISONE CREAM  ', 'pharmacy'],
-    ['Dog food', 'pet-store'],
-    ['  DOG FOOD  ', 'pet-store'],
-  ] as const)('maps %j to the %s category', async (item, category) => {
-    const candidates: readonly PlaceCandidate[] = [
+  const location = { latitude: 34.05, longitude: -118.25 };
+
+  it('queries every category on a multi-category item', async () => {
+    const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([]);
+    const { service } = await createService(search);
+
+    await expect(
+      service.findCandidates({
+        items: [
+          {
+            id: 'item-1',
+            revision: 3,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store', 'convenience-store'],
+          },
+        ],
+        location,
+      }),
+    ).resolves.toEqual({
+      status: 'complete',
+      stores: [],
+      categoryFailures: [],
+    });
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search).toHaveBeenCalledWith({
+      categories: ['grocery-store'],
+      location,
+    });
+    expect(search).toHaveBeenCalledWith({
+      categories: ['convenience-store'],
+      location,
+    });
+  });
+
+  it('merges shared Google places and associates all applicable item IDs', async () => {
+    const search = vi.fn<PlacesProvider['search']>().mockResolvedValue([
       {
-        id: 'market-1',
-        name: 'Neighborhood Market',
+        id: 'google-place-1',
+        name: 'Shared Store',
         location: { latitude: 34.051, longitude: -118.251 },
       },
-    ];
-    const search = vi.fn().mockResolvedValue(candidates);
+    ]);
     const { service } = await createService(search);
-    const location = { latitude: 34.05, longitude: -118.25 };
 
     await expect(
       service.findCandidates({
-        items: [{ id: 'item-1', text: item }],
+        items: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store', 'pharmacy'],
+          },
+          {
+            id: 'item-2',
+            revision: 2,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+        ],
         location,
       }),
     ).resolves.toEqual({
-      results: [{ itemId: 'item-1', candidates }],
-      unsupportedItemIds: [],
-    });
-    expect(search).toHaveBeenCalledWith({
-      categories: [category],
-      location,
-    });
-  });
-
-  it('returns unsupported items without calling the provider', async () => {
-    const { search, service } = await createService();
-    const request = {
-      items: [
-        { id: 'item-1', text: 'Bread' },
-        { id: 'item-2', text: 'Dry cleaning' },
-      ],
-      location: { latitude: 34.05, longitude: -118.25 },
-    };
-
-    await expect(service.findCandidates(request)).resolves.toEqual({
-      results: [],
-      unsupportedItemIds: ['item-1', 'item-2'],
-    });
-    expect(search).not.toHaveBeenCalled();
-  });
-
-  it('queries once per category and preserves input order and item IDs', async () => {
-    const candidatesByCategory: Record<string, readonly PlaceCandidate[]> = {
-      'grocery-store': [
+      status: 'complete',
+      stores: [
         {
-          id: 'market-1',
-          name: 'Neighborhood Market',
+          placeId: 'google-place-1',
+          name: 'Shared Store',
           location: { latitude: 34.051, longitude: -118.251 },
+          itemIds: ['item-1', 'item-2'],
         },
       ],
-      pharmacy: [
-        {
-          id: 'pharmacy-1',
-          name: 'Neighborhood Pharmacy',
-          location: { latitude: 34.052, longitude: -118.252 },
-        },
-      ],
-      'pet-store': [
-        {
-          id: 'pet-store-1',
-          name: 'Neighborhood Pet Store',
-          location: { latitude: 34.053, longitude: -118.253 },
-        },
-      ],
-    };
+      categoryFailures: [],
+    });
+    expect(search).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps successful stores when another category fails', async () => {
     const search = vi
       .fn<PlacesProvider['search']>()
-      .mockImplementation(({ categories }) => {
-        return Promise.resolve(candidatesByCategory[categories[0]]);
-      });
+      .mockImplementation(({ categories }) =>
+        categories[0] === 'pharmacy'
+          ? Promise.reject(new Error('upstream failed'))
+          : Promise.resolve([
+              {
+                id: 'google-place-1',
+                name: 'Market',
+                location: { latitude: 34.051, longitude: -118.251 },
+              },
+            ]),
+      );
     const { service } = await createService(search);
-    const location = { latitude: 34.05, longitude: -118.25 };
 
     await expect(
       service.findCandidates({
         items: [
-          { id: 'item-1', text: 'Milk' },
-          { id: 'item-2', text: 'Cortisone cream' },
-          { id: 'item-3', text: 'Bananas' },
-          { id: 'item-4', text: 'Dog food' },
-          { id: 'item-5', text: 'Bread' },
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store'],
+          },
+          {
+            id: 'item-2',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['pharmacy'],
+          },
         ],
         location,
       }),
     ).resolves.toEqual({
-      results: [
-        { itemId: 'item-1', candidates: candidatesByCategory['grocery-store'] },
-        { itemId: 'item-2', candidates: candidatesByCategory.pharmacy },
-        { itemId: 'item-3', candidates: candidatesByCategory['grocery-store'] },
-        { itemId: 'item-4', candidates: candidatesByCategory['pet-store'] },
+      status: 'partial',
+      stores: [
+        {
+          placeId: 'google-place-1',
+          name: 'Market',
+          location: { latitude: 34.051, longitude: -118.251 },
+          itemIds: ['item-1'],
+        },
       ],
-      unsupportedItemIds: ['item-5'],
-    });
-    expect(search).toHaveBeenCalledTimes(3);
-    expect(search).toHaveBeenCalledWith({
-      categories: ['grocery-store'],
-      location,
-    });
-    expect(search).toHaveBeenCalledWith({
-      categories: ['pharmacy'],
-      location,
-    });
-    expect(search).toHaveBeenCalledWith({
-      categories: ['pet-store'],
-      location,
+      categoryFailures: [{ category: 'pharmacy', code: 'provider-error' }],
     });
   });
 
-  it('shares one grocery search across Milk and Bananas', async () => {
-    const search = vi.fn().mockResolvedValue([]);
+  it('reports a failed result when every category fails', async () => {
+    const search = vi
+      .fn<PlacesProvider['search']>()
+      .mockRejectedValue(new Error('upstream failed'));
     const { service } = await createService(search);
 
     await expect(
       service.findCandidates({
         items: [
-          { id: 'item-1', text: 'Milk' },
-          { id: 'item-2', text: 'Bread' },
-          { id: 'item-3', text: 'Bananas' },
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store', 'pharmacy'],
+          },
         ],
-        location: { latitude: 34.05, longitude: -118.25 },
+        location,
       }),
     ).resolves.toEqual({
-      results: [
-        { itemId: 'item-1', candidates: [] },
-        { itemId: 'item-3', candidates: [] },
+      status: 'failed',
+      stores: [],
+      categoryFailures: [
+        { category: 'grocery-store', code: 'provider-error' },
+        { category: 'pharmacy', code: 'provider-error' },
       ],
-      unsupportedItemIds: ['item-2'],
-    });
-    expect(search).toHaveBeenCalledTimes(1);
-    expect(search).toHaveBeenCalledWith({
-      categories: ['grocery-store'],
-      location: { latitude: 34.05, longitude: -118.25 },
     });
   });
 });

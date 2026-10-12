@@ -1,8 +1,11 @@
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsDefined,
+  IsIn,
+  IsInt,
   IsNumber,
   IsString,
   Matches,
@@ -10,6 +13,10 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+
+import { DESTINATION_TAXONOMY_VERSION } from '../../classification/classification-response';
+import { DESTINATION_CATEGORIES } from '../destination-category';
+import type { DestinationCategory } from '../destination-category';
 
 export class CurrentLocationDto {
   @IsNumber({ allowInfinity: false, allowNaN: false })
@@ -30,16 +37,25 @@ export class ItemDto {
   })
   id!: string;
 
-  @IsString()
-  @Matches(/\S/, {
-    message: 'item text must contain at least one non-whitespace character',
-  })
-  text!: string;
+  @IsInt()
+  @Min(1)
+  revision!: number;
+
+  @IsInt()
+  @IsIn([DESTINATION_TAXONOMY_VERSION])
+  taxonomyVersion!: typeof DESTINATION_TAXONOMY_VERSION;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayUnique()
+  @IsIn(DESTINATION_CATEGORIES, { each: true })
+  categories!: DestinationCategory[];
 }
 
 export class FindPlaceCandidatesDto {
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayUnique((item: ItemDto | null | undefined) => item?.id)
   @ValidateNested({ each: true })
   @Type(() => ItemDto)
   items!: ItemDto[];
