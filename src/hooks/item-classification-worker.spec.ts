@@ -406,8 +406,80 @@ describe('ItemClassificationWorker', () => {
     expect(classify).toHaveBeenCalledTimes(1);
   });
 
+  it('logs the HTTP status when a classification request fails', async () => {
+    vi.stubGlobal('__DEV__', true);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const classify = vi
+      .fn<Classify>()
+      .mockRejectedValue(new ClassificationHttpError(503, 'Service Unavailable'));
+
+    try {
+      const harness = createHarness([makeItem()], classify);
+      harness.start();
+      await runReadyWork();
+
+      expect(info).toHaveBeenCalledWith(
+        '[classification] Classification failed.',
+        expect.objectContaining({
+          errorType: 'ClassificationHttpError',
+          status: 503,
+          failureKind: 'server',
+          retryable: true,
+        }),
+      );
+    } finally {
+      info.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('omits HTTP status for a non-HTTP classification failure', async () => {
+    vi.stubGlobal('__DEV__', true);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const classify = vi
+      .fn<Classify>()
+      .mockRejectedValue(new ClassificationNetworkError(new Error('offline')));
+
+    try {
+      const harness = createHarness([makeItem()], classify);
+      harness.start();
+      await runReadyWork();
+
+      expect(info).toHaveBeenCalledWith(
+        '[classification] Classification failed.',
+        expect.not.objectContaining({ status: expect.anything() }),
+      );
+    } finally {
+      info.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not retry an upstream provider rejection', async () => {
+    const classify = vi
+      .fn<Classify>()
+      .mockRejectedValue(
+        new ClassificationHttpError(422, 'Unprocessable Entity'),
+      );
+    const harness = createHarness([makeItem()], classify);
+    harness.start();
+
+    await runReadyWork();
+    expect(harness.items[0]?.classification).toMatchObject({
+      status: 'failed',
+      attemptCount: 1,
+      failureKind: 'server',
+      retryable: false,
+      nextAttemptAt: null,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(classify).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
+    new ClassificationHttpError(429, 'Too Many Requests'),
     new ClassificationHttpError(503, 'Service Unavailable'),
+    new ClassificationHttpError(504, 'Gateway Timeout'),
     new ClassificationTimeoutError(),
   ])('schedules a retry for a temporary server failure', async (error) => {
     const classify = vi.fn<Classify>().mockRejectedValue(error);

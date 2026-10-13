@@ -1,7 +1,9 @@
 import {
   BadGatewayException,
   GatewayTimeoutException,
+  Logger,
   ServiceUnavailableException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -44,10 +46,12 @@ describe('GeminiClassificationProvider', () => {
     vi.setSystemTime(new Date('2026-10-09T17:00:00.000Z'));
     sdk.construct.mockClear();
     sdk.generateContent.mockReset();
+    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('sends the evaluated model, v3 prompt, JSON schema, and MIME type', async () => {
@@ -98,7 +102,8 @@ describe('GeminiClassificationProvider', () => {
     },
   );
 
-  it('enforces one total 10-second deadline', async () => {
+  it('enforces one total 20-second deadline', async () => {
+    expect(GEMINI_CLASSIFICATION_DEADLINE_MS).toBe(20_000);
     sdk.generateContent.mockReturnValue(new Promise(() => undefined));
 
     const result = expect(
@@ -218,11 +223,229 @@ describe('GeminiClassificationProvider', () => {
   });
 
   it('returns 502 for a non-transient provider error without retrying', async () => {
-    sdk.generateContent.mockRejectedValue({ status: 400 });
+    sdk.generateContent.mockRejectedValue({ status: 403 });
 
     await expect(createProvider().classify('Milk')).rejects.toEqual(
       new BadGatewayException('Classification provider request failed'),
     );
     expect(sdk.generateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 422 for an upstream HTTP 400 without retrying', async () => {
+    sdk.generateContent.mockRejectedValue({ status: 400 });
+
+    await expect(createProvider().classify('Milk')).rejects.toEqual(
+      new UnprocessableEntityException(
+        'Classification provider request failed',
+      ),
+    );
+    expect(sdk.generateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([503, 504])(
+    'retries upstream HTTP %s and returns 502 when the retry is exhausted',
+    async (status) => {
+      sdk.generateContent.mockRejectedValue({ status });
+
+      await expect(createProvider().classify('Milk')).rejects.toEqual(
+        new BadGatewayException('Classification provider request failed'),
+      );
+      expect(sdk.generateContent).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('logs a safe failure when the API key is missing', async () => {
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        createProvider('').classify('Batteries'),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(errorLog).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 503,
+        errorType: 'ServiceUnavailableException',
+        durationMs: expect.any(Number) as unknown,
+      });
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Batteries');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('logs one safe failure after Gemini retries are exhausted', async () => {
+    const apiKey = 'test-api-key';
+    const itemText = 'Batteries for the cabin';
+    const providerBody = 'raw provider payload with account details';
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockRejectedValue(new TypeError(providerBody));
+
+    try {
+      await expect(createProvider(apiKey).classify(itemText)).rejects.toEqual(
+        new BadGatewayException('Classification provider request failed'),
+      );
+
+      expect(sdk.generateContent).toHaveBeenCalledTimes(2);
+      expect(errorLog).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 502,
+        errorType: 'BadGatewayException',
+        durationMs: expect.any(Number) as unknown,
+        failureReason: 'provider-request',
+        sdkErrorType: 'TypeError',
+      });
+      const logged = JSON.stringify(errorLog.mock.calls);
+      expect(logged).not.toContain(apiKey);
+      expect(logged).not.toContain(itemText);
+      expect(logged).not.toContain(providerBody);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('logs an invalid provider response without its body', async () => {
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockResolvedValue({
+      text: 'not-json secret-response',
+    });
+
+    try {
+      await expect(createProvider().classify('Milk')).rejects.toEqual(
+        new BadGatewayException(
+          'Classification provider returned an invalid response',
+        ),
+      );
+
+      expect(errorLog).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 502,
+        errorType: 'BadGatewayException',
+        durationMs: expect.any(Number) as unknown,
+        failureReason: 'invalid-response',
+      });
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(
+        'secret-response',
+      );
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Milk');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('logs the SDK status for a provider request failure', async () => {
+    const secretMessage = 'secret sdk message with response body';
+    const sdkError = new Error(secretMessage);
+    sdkError.name = 'ApiError';
+    Object.assign(sdkError, { status: 400 });
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockRejectedValue(sdkError);
+
+    try {
+      await expect(createProvider().classify('Milk')).rejects.toEqual(
+        new UnprocessableEntityException(
+          'Classification provider request failed',
+        ),
+      );
+
+      expect(sdk.generateContent).toHaveBeenCalledOnce();
+      expect(errorLog).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 422,
+        errorType: 'UnprocessableEntityException',
+        durationMs: expect.any(Number) as unknown,
+        failureReason: 'provider-request',
+        sdkErrorType: 'ApiError',
+        sdkStatus: 400,
+      });
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(secretMessage);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Milk');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('logs a gateway timeout', async () => {
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockReturnValue(new Promise(() => undefined));
+
+    try {
+      const result = expect(
+        createProvider().classify('Milk'),
+      ).rejects.toBeInstanceOf(GatewayTimeoutException);
+      await vi.advanceTimersByTimeAsync(GEMINI_CLASSIFICATION_DEADLINE_MS);
+      await result;
+
+      expect(errorLog).toHaveBeenCalledOnce();
+      const logEntry = errorLog.mock.calls[0]?.[0] as {
+        durationMs: number;
+      };
+      expect(logEntry).toMatchObject({
+        event: 'gemini_classification.failed',
+        statusCode: 504,
+        errorType: 'GatewayTimeoutException',
+      });
+      expect(logEntry.durationMs).toBeGreaterThanOrEqual(0);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Milk');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('does not log a failure when classification succeeds', async () => {
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockResolvedValue({
+      text: JSON.stringify({
+        outcome: 'no-destination',
+        categories: [],
+        taxonomyVersion: 1,
+      }),
+    });
+
+    try {
+      await createProvider('test-api-key').classify('Call Mom');
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('does not log a retried provider error that later succeeds', async () => {
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent
+      .mockRejectedValueOnce(new TypeError('network failed'))
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          outcome: 'no-destination',
+          categories: [],
+          taxonomyVersion: 1,
+        }),
+      });
+
+    try {
+      await createProvider().classify('Call Mom');
+      expect(sdk.generateContent).toHaveBeenCalledTimes(2);
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });

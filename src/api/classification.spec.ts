@@ -235,6 +235,7 @@ describe('classifyItem', () => {
   });
 
   it('times out and aborts the request after the client deadline', async () => {
+    expect(CLASSIFICATION_REQUEST_TIMEOUT_MS).toBe(22_000);
     vi.useFakeTimers();
     vi.stubEnv('EXPO_PUBLIC_API_BASE_URL', 'http://localhost:3000');
     let requestSignal: AbortSignal | undefined;

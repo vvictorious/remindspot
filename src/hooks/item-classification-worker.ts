@@ -412,6 +412,9 @@ export class ItemClassificationWorker {
           revision: attempt.sourceRevision,
           attemptCount: attempt.attemptCount,
           errorType: errorType(error),
+          ...(error instanceof ClassificationHttpError
+            ? { status: error.status }
+            : {}),
           failureKind: classifiedFailure.failureKind,
           retryable: canRetry,
           nextAttemptAt,

@@ -5,7 +5,7 @@ import {
   type ItemClassificationResult,
 } from '../models/Classification';
 
-export const CLASSIFICATION_REQUEST_TIMEOUT_MS = 12_000;
+export const CLASSIFICATION_REQUEST_TIMEOUT_MS = 22_000;
 
 const MAX_CLARIFICATION_QUESTION_LENGTH = 160;
 const destinationCategorySet = new Set<string>(DESTINATION_CATEGORIES);

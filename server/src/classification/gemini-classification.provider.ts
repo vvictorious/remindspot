@@ -2,8 +2,11 @@ import { GoogleGenAI } from '@google/genai';
 import {
   BadGatewayException,
   GatewayTimeoutException,
+  HttpException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -100,6 +103,84 @@ function isTimeoutError(error: unknown) {
   );
 }
 
+type GeminiClassificationFailureDetails = {
+  failureReason: 'invalid-response' | 'provider-request';
+  sdkErrorType?: string;
+  sdkStatus?: number;
+};
+
+const failureDetails = new WeakMap<
+  object,
+  GeminiClassificationFailureDetails
+>();
+
+function sdkErrorType(error: unknown): string | undefined {
+  if (!isRecord(error) || typeof error.name !== 'string' || !error.name) {
+    return undefined;
+  }
+
+  return error.name;
+}
+
+function sdkStatus(error: unknown): number | undefined {
+  if (
+    !isRecord(error) ||
+    typeof error.status !== 'number' ||
+    !Number.isFinite(error.status)
+  ) {
+    return undefined;
+  }
+
+  return error.status;
+}
+
+function isUpstreamBadRequest(error: unknown) {
+  return errorChainIncludes(error, ({ status }) => status === 400);
+}
+
+function invalidResponseException(): BadGatewayException {
+  const exception = new BadGatewayException(
+    'Classification provider returned an invalid response',
+  );
+  failureDetails.set(exception, { failureReason: 'invalid-response' });
+  return exception;
+}
+
+function providerFailureDetails(
+  error: unknown,
+): GeminiClassificationFailureDetails {
+  const details: GeminiClassificationFailureDetails = {
+    failureReason: 'provider-request',
+  };
+  const errorType = sdkErrorType(error);
+  const status = sdkStatus(error);
+  if (errorType !== undefined) {
+    details.sdkErrorType = errorType;
+  }
+  if (status !== undefined) {
+    details.sdkStatus = status;
+  }
+  return details;
+}
+
+function providerRequestException(error: unknown): BadGatewayException {
+  const exception = new BadGatewayException(
+    'Classification provider request failed',
+  );
+  failureDetails.set(exception, providerFailureDetails(error));
+  return exception;
+}
+
+function upstreamBadRequestException(
+  error: unknown,
+): UnprocessableEntityException {
+  const exception = new UnprocessableEntityException(
+    'Classification provider request failed',
+  );
+  failureDetails.set(exception, providerFailureDetails(error));
+  return exception;
+}
+
 function isTransientError(error: unknown) {
   if (isRateLimitError(error) || error instanceof TypeError) {
     return true;
@@ -118,11 +199,23 @@ function isTransientError(error: unknown) {
 
 @Injectable()
 export class GeminiClassificationProvider implements ClassificationProvider {
+  private readonly logger = new Logger(GeminiClassificationProvider.name);
   private client?: GoogleGenAI;
 
   constructor(private readonly config: ConfigService) {}
 
   async classify(text: string): Promise<unknown> {
+    const startedAt = performance.now();
+
+    try {
+      return await this.classifyWithProvider(text);
+    } catch (error) {
+      this.logFailure(error, startedAt);
+      throw error;
+    }
+  }
+
+  private async classifyWithProvider(text: string): Promise<unknown> {
     const apiKey = this.config.get<string>('GEMINI_API_KEY');
     if (!apiKey) {
       throw new ServiceUnavailableException(
@@ -186,6 +279,10 @@ export class GeminiClassificationProvider implements ClassificationProvider {
           throw error;
         }
 
+        if (isUpstreamBadRequest(error)) {
+          throw upstreamBadRequestException(error);
+        }
+
         const canRetry =
           attempt < GEMINI_CLASSIFICATION_MAX_ATTEMPTS &&
           isTransientError(error) &&
@@ -200,28 +297,44 @@ export class GeminiClassificationProvider implements ClassificationProvider {
           );
         }
 
-        throw new BadGatewayException('Classification provider request failed');
+        throw providerRequestException(error);
       } finally {
         clearTimeout(timeout);
       }
     }
 
-    throw new BadGatewayException('Classification provider request failed');
+    throw providerRequestException(undefined);
+  }
+
+  private logFailure(error: unknown, startedAt: number): void {
+    const statusCode =
+      error instanceof HttpException ? error.getStatus() : undefined;
+    const details =
+      typeof error === 'object' && error !== null
+        ? failureDetails.get(error)
+        : undefined;
+    if (typeof error === 'object' && error !== null) {
+      failureDetails.delete(error);
+    }
+
+    this.logger.error({
+      event: 'gemini_classification.failed',
+      statusCode,
+      errorType: error instanceof Error ? error.name : typeof error,
+      durationMs: Math.round(performance.now() - startedAt),
+      ...details,
+    });
   }
 
   private parseResponse(text: string | undefined): unknown {
     if (!text?.trim()) {
-      throw new BadGatewayException(
-        'Classification provider returned an invalid response',
-      );
+      throw invalidResponseException();
     }
 
     try {
       return JSON.parse(text) as unknown;
     } catch {
-      throw new BadGatewayException(
-        'Classification provider returned an invalid response',
-      );
+      throw invalidResponseException();
     }
   }
 }
