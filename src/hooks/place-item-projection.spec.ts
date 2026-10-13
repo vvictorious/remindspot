@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyClassificationResult,
+  completeItem,
   createItem,
+  undoItemCompletion,
   updateItemText,
 } from '../models/item-transitions';
 import {
@@ -205,5 +207,32 @@ describe('place item projection', () => {
     expect(createPlaceRequestItemsSignature([classified])).not.toBe('[]');
     expect(createPlaceRequestItemsSignature([edited])).toBe('[]');
     expect(createPlaceRequestItemsSignature([])).toBe('[]');
+  });
+
+  it('excludes a completed item and restores the same signature on undo', () => {
+    const classified = classify(makeItem(), ['grocery-store']);
+    const bread = createItem('item-2', 'Bread', '2026-10-09T12:00:00.000Z');
+    if (bread === null) {
+      throw new Error('Test item was not created.');
+    }
+    const other = classify(bread, ['pharmacy']);
+    const [completed] = completeItem(
+      [classified],
+      classified.id,
+      '2026-10-13T18:00:00.000Z',
+    );
+    const [restored] = undoItemCompletion([completed], classified.id);
+
+    expect(createPlaceRequestItemsSignature([completed])).toBe('[]');
+    expect(
+      parsePlaceRequestItemsSignature(
+        createPlaceRequestItemsSignature([completed, other]),
+      ).map((item) => item.id),
+    ).toEqual(['item-2']);
+    expect(completed.revision).toBe(classified.revision);
+    expect(createPlaceRequestItemsSignature([restored])).toBe(
+      createPlaceRequestItemsSignature([classified]),
+    );
+    expect(restored.revision).toBe(classified.revision);
   });
 });

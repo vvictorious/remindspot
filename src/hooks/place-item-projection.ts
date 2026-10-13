@@ -9,6 +9,10 @@ const categoryOrder = new Map(
 );
 
 function toPlaceRequestItem(item: Item): PlaceRequestItem | null {
+  if (item.completedAt !== undefined) {
+    return null;
+  }
+
   const { classification } = item;
   if (
     classification.status !== 'current' ||

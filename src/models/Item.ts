@@ -7,4 +7,5 @@ export type Item = {
   updatedAt: string;
   revision: number;
   classification: ItemClassification;
+  completedAt?: string;
 };

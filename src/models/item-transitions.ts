@@ -56,6 +56,10 @@ function attemptMatchesItem(
   );
 }
 
+function isCompleted(item: Item): boolean {
+  return item.completedAt !== undefined;
+}
+
 function canMarkPending(
   item: Item,
   attempt: ClassificationAttemptSnapshot,
@@ -134,13 +138,54 @@ export function deleteItem(items: readonly Item[], id: string): Item[] {
   return nextItems.length === items.length ? (items as Item[]) : nextItems;
 }
 
+export function completeItem(
+  items: readonly Item[],
+  id: string,
+  completedAt: string,
+): Item[] {
+  let changed = false;
+  const nextItems = items.map((item) => {
+    if (item.id !== id || isCompleted(item)) {
+      return item;
+    }
+
+    changed = true;
+    return {
+      ...item,
+      completedAt,
+    };
+  });
+
+  return changed ? nextItems : (items as Item[]);
+}
+
+export function undoItemCompletion(items: readonly Item[], id: string): Item[] {
+  let changed = false;
+  const nextItems = items.map((item) => {
+    if (item.id !== id || !isCompleted(item)) {
+      return item;
+    }
+
+    changed = true;
+    const activeItem = { ...item };
+    delete activeItem.completedAt;
+    return activeItem;
+  });
+
+  return changed ? nextItems : (items as Item[]);
+}
+
 export function retryItemClassification(
   items: readonly Item[],
   id: string,
 ): Item[] {
   let changed = false;
   const nextItems = items.map((item) => {
-    if (item.id !== id || item.classification.status !== 'failed') {
+    if (
+      item.id !== id ||
+      isCompleted(item) ||
+      item.classification.status !== 'failed'
+    ) {
       return item;
     }
 
@@ -162,7 +207,7 @@ export function markClassificationPending(
 ): Item[] {
   let changed = false;
   const nextItems = items.map((item) => {
-    if (item.id !== id || !canMarkPending(item, attempt)) {
+    if (item.id !== id || isCompleted(item) || !canMarkPending(item, attempt)) {
       return item;
     }
 
@@ -202,7 +247,11 @@ export function applyClassificationResult(
 
   let changed = false;
   const nextItems = items.map((item) => {
-    if (item.id !== id || !attemptMatchesItem(item, attempt)) {
+    if (
+      item.id !== id ||
+      isCompleted(item) ||
+      !attemptMatchesItem(item, attempt)
+    ) {
       return item;
     }
 
@@ -231,7 +280,11 @@ export function markClassificationFailed(
 ): Item[] {
   let changed = false;
   const nextItems = items.map((item) => {
-    if (item.id !== id || !attemptMatchesItem(item, attempt)) {
+    if (
+      item.id !== id ||
+      isCompleted(item) ||
+      !attemptMatchesItem(item, attempt)
+    ) {
       return item;
     }
 

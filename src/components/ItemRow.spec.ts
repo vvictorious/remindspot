@@ -56,6 +56,7 @@ function renderRow(
 ) {
   const props: React.ComponentProps<typeof ItemRow> = {
     item,
+    onComplete: vi.fn(),
     onDelete: vi.fn(),
     onEdit: vi.fn(),
     onRetryClassification: vi.fn(),
@@ -193,6 +194,42 @@ describe('ItemRow existing interactions', () => {
     outcome: 'no-destination',
     categories: [],
     taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+  });
+
+  it('completes from its control without starting an edit', () => {
+    const onComplete = vi.fn();
+    const onEdit = vi.fn();
+    const { renderer } = renderRow(makeItem(classification), {
+      onComplete,
+      onEdit,
+    });
+
+    act(() => {
+      renderer.root
+        .findByProps({ accessibilityLabel: 'Complete Milk' })
+        .props.onPress();
+    });
+
+    expect(onComplete).toHaveBeenCalledWith('item-1');
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(findTextInputs(renderer)).toHaveLength(0);
+  });
+
+  it('hides the completion control while editing', () => {
+    const { renderer } = renderRow(makeItem(classification));
+
+    act(() => {
+      renderer.root
+        .findByProps({ accessibilityLabel: 'Edit Milk' })
+        .props.onPress();
+    });
+
+    expect(
+      renderer.root.findAll(
+        ({ props }) => props.accessibilityLabel === 'Complete Milk',
+      ),
+    ).toHaveLength(0);
+    expect(findTextInputs(renderer)).toHaveLength(1);
   });
 
   it('continues to support editing and deleting', () => {

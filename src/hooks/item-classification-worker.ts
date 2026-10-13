@@ -116,6 +116,10 @@ export function getClassificationRetryDelayMs(
 }
 
 function eligibleAttempt(item: Item): EligibleAttempt | null {
+  if (item.completedAt !== undefined) {
+    return null;
+  }
+
   const classification = item.classification;
   const source = {
     sourceRevision: item.revision,
@@ -310,6 +314,10 @@ export class ItemClassificationWorker {
         break;
       }
 
+      if (item.completedAt !== undefined) {
+        continue;
+      }
+
       if (item.classification.status === 'current') {
         const key = requestKey(item.id, item.revision);
         if (!this.loggedCurrentItems.has(key)) {
@@ -373,7 +381,7 @@ export class ItemClassificationWorker {
       { signal: controller.signal },
     )
       .then((result) => {
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted || this.isCompleted(item.id)) {
           return;
         }
         developmentLog('Classification succeeded.', {
@@ -388,7 +396,8 @@ export class ItemClassificationWorker {
       .catch((error: unknown) => {
         if (
           error instanceof ClassificationCancelledError ||
-          controller.signal.aborted
+          controller.signal.aborted ||
+          this.isCompleted(item.id)
         ) {
           return;
         }
@@ -432,6 +441,12 @@ export class ItemClassificationWorker {
       });
   }
 
+  private isCompleted(id: string): boolean {
+    return this.state.items.some(
+      (item) => item.id === id && item.completedAt !== undefined,
+    );
+  }
+
   private abortObsoleteRequests(): void {
     const itemsById = new Map(this.state.items.map((item) => [item.id, item]));
 
@@ -439,6 +454,7 @@ export class ItemClassificationWorker {
       const item = itemsById.get(itemId);
       if (
         item === undefined ||
+        item.completedAt !== undefined ||
         item.revision !== attempt.sourceRevision ||
         item.text !== attempt.sourceText ||
         item.classification.taxonomyVersion !== attempt.taxonomyVersion

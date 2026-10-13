@@ -35,6 +35,19 @@ function isRetryDate(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
 }
 
+function readCompletedAt(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const completedAt = value.trim();
+  if (completedAt.length === 0 || !Number.isFinite(Date.parse(completedAt))) {
+    return undefined;
+  }
+
+  return completedAt;
+}
+
 function parseClassificationResult(
   value: unknown,
 ): ItemClassificationResult | null {
@@ -203,9 +216,12 @@ function normalizeItem(value: unknown): Item {
   }
 
   const revision = isPositiveInteger(value.revision) ? value.revision : 1;
+  const completedAt = readCompletedAt(value.completedAt);
+  const storedItem = { ...value };
+  delete storedItem.completedAt;
 
   return {
-    ...value,
+    ...storedItem,
     id: value.id,
     text: value.text,
     createdAt: value.createdAt,
@@ -216,6 +232,7 @@ function normalizeItem(value: unknown): Item {
       revision,
       value.text,
     ),
+    ...(completedAt === undefined ? {} : { completedAt }),
   } as Item;
 }
 

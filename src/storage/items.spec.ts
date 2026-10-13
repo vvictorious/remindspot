@@ -169,6 +169,62 @@ describe('item persistence', () => {
     });
   });
 
+  it('preserves completion without changing identity or classification', () => {
+    const item: Item = {
+      ...baseItem,
+      revision: 2,
+      completedAt: '2026-10-13T18:00:00.000Z',
+      classification: {
+        status: 'current',
+        sourceRevision: 2,
+        sourceText: 'Milk',
+        taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+        result: {
+          outcome: 'classified',
+          categories: ['grocery-store'],
+          taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+        },
+      },
+    };
+
+    expect(parseStoredItems(serializeItems([item]))).toEqual([item]);
+  });
+
+  it.each([
+    '',
+    '   ',
+    'not-a-date',
+    1_700_000_000_000,
+  ])('drops invalid completion state %j and keeps the item active', (completedAt) => {
+    const [item] = normalizeStoredItems([
+      {
+        ...baseItem,
+        revision: 4,
+        completedAt,
+        classification: {
+          status: 'pending',
+          sourceRevision: 4,
+          sourceText: 'Milk',
+          taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+          attemptCount: 2,
+          nextAttemptAt: null,
+        },
+      },
+    ]);
+
+    expect(item.completedAt).toBeUndefined();
+    expect(item).toMatchObject({
+      ...baseItem,
+      revision: 4,
+      classification: {
+        status: 'pending',
+        sourceRevision: 4,
+        sourceText: 'Milk',
+        attemptCount: 2,
+      },
+    });
+  });
+
   it('rejects invalid storage containers and missing legacy fields', () => {
     expect(() => normalizeStoredItems({})).toThrow();
     expect(() =>

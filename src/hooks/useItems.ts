@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ItemClassificationResult } from '../models/Classification';
 import {
   applyClassificationResult as applyResult,
+  completeItem as completeStoredItem,
   createItem,
   deleteItem as removeItem,
   markClassificationFailed as markFailed,
   markClassificationPending as markPending,
   retryItemClassification,
+  undoItemCompletion as undoStoredItemCompletion,
   updateItemText,
   type ClassificationAttemptSnapshot,
   type ClassificationFailure,
@@ -103,6 +105,16 @@ export function useItems() {
     setItems((currentItems) => removeItem(currentItems, id));
   }, []);
 
+  const completeItem = useCallback((id: string) => {
+    setItems((currentItems) =>
+      completeStoredItem(currentItems, id, new Date().toISOString()),
+    );
+  }, []);
+
+  const undoItemCompletion = useCallback((id: string) => {
+    setItems((currentItems) => undoStoredItemCompletion(currentItems, id));
+  }, []);
+
   const retryClassification = useCallback((id: string) => {
     setItems((currentItems) => retryItemClassification(currentItems, id));
   }, []);
@@ -153,6 +165,8 @@ export function useItems() {
     addItem,
     updateItem,
     deleteItem,
+    completeItem,
+    undoItemCompletion,
     retryClassification,
     markClassificationPending,
     applyClassificationResult,

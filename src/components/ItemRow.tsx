@@ -16,6 +16,7 @@ const DELETE_ACTION_WIDTH = 88;
 
 type ItemRowProps = {
   item: Item;
+  onComplete: (id: string) => void;
   onDelete: (id: string) => void;
   onEdit: (id: string, text: string) => void;
   onRetryClassification: (id: string) => void;
@@ -23,6 +24,7 @@ type ItemRowProps = {
 
 export function ItemRow({
   item,
+  onComplete,
   onDelete,
   onEdit,
   onRetryClassification,
@@ -130,6 +132,18 @@ export function ItemRow({
         ) : (
           <View style={styles.itemContent}>
             <Pressable
+              accessibilityLabel={`Complete ${item.text}`}
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={() => onComplete(item.id)}
+              style={({ pressed }) => [
+                styles.completeButton,
+                pressed && styles.statusPressed,
+              ]}
+            >
+              <View style={styles.completeMark} />
+            </Pressable>
+            <Pressable
               accessibilityHint="Double tap to edit. Swipe left for delete."
               accessibilityLabel={`Edit ${item.text}`}
               accessibilityRole="button"
@@ -235,11 +249,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'stretch',
   },
+  completeButton: {
+    paddingLeft: 16,
+    paddingRight: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  completeMark: {
+    width: 22,
+    height: 22,
+    borderColor: '#aaa79f',
+    borderRadius: 11,
+    borderWidth: 1.5,
+  },
   itemTextButton: {
     flex: 1,
     minHeight: 62,
     paddingVertical: 10,
-    paddingLeft: 18,
     paddingRight: 10,
     justifyContent: 'center',
   },

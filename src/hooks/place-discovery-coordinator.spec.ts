@@ -225,6 +225,50 @@ describe('PlaceDiscoveryCoordinator', () => {
     expect(harness.states.at(-1)?.status).toBe('idle');
   });
 
+  it('clears candidates when the last eligible item leaves and discovers again when it returns', async () => {
+    const stores = [
+      {
+        placeId: 'place-1',
+        name: 'Market',
+        location: { latitude: 34.027, longitude: -118.393 },
+        itemIds: ['item-1'],
+      },
+    ];
+    const harness = createHarness({
+      discover: async () => ({
+        status: 'complete',
+        stores,
+        categoryFailures: [],
+      }),
+    });
+    harness.update([groceryItem]);
+    await advance();
+    expect(harness.states.at(-1)).toMatchObject({
+      status: 'complete',
+      stores,
+    });
+
+    harness.update([]);
+    expect(harness.states.at(-1)).toMatchObject({
+      status: 'idle',
+      stores: [],
+    });
+    expect(harness.discover).toHaveBeenCalledOnce();
+
+    harness.update([groceryItem]);
+    expect(harness.states.at(-1)).toMatchObject({
+      status: 'loading',
+      stores: [],
+    });
+    await advance();
+    expect(harness.discover).toHaveBeenCalledTimes(2);
+    expect(harness.discover.mock.calls[1][0].items).toEqual([groceryItem]);
+    expect(harness.states.at(-1)).toMatchObject({
+      status: 'complete',
+      stores,
+    });
+  });
+
   it('keeps successful stores and all associations for partial results', async () => {
     const harness = createHarness({
       discover: async () => ({

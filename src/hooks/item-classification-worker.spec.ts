@@ -14,9 +14,11 @@ import {
 } from '../models/Classification';
 import {
   applyClassificationResult,
+  completeItem,
   createItem,
   markClassificationFailed,
   markClassificationPending,
+  undoItemCompletion,
   updateItemText,
 } from '../models/item-transitions';
 import type { Item } from '../models/Item';
@@ -524,6 +526,79 @@ describe('ItemClassificationWorker', () => {
     await runReadyWork();
 
     expect(classify).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start classification for a completed item', async () => {
+    const [completed] = completeItem(
+      [makeItem()],
+      'item-1',
+      now.toISOString(),
+    );
+    const { classify } = createControlledClassifier();
+    const harness = createHarness([completed], classify);
+    harness.start();
+    await runReadyWork();
+
+    expect(classify).not.toHaveBeenCalled();
+    expect(harness.items[0]?.revision).toBe(1);
+    expect(harness.items[0]?.classification.status).toBe('pending');
+  });
+
+  it('aborts in-flight classification and ignores a late result', async () => {
+    const { classify, requests } = createControlledClassifier({
+      rejectOnAbort: false,
+    });
+    const harness = createHarness([makeItem()], classify);
+    harness.start();
+    await runReadyWork();
+
+    const completedAt = new Date(now.getTime() + 1_000).toISOString();
+    const completed = completeItem(harness.items, 'item-1', completedAt);
+    harness.setItems(completed);
+    expect(requests[0]?.signal.aborted).toBe(true);
+
+    requests[0]?.resolve(classifiedResult);
+    await runReadyWork();
+
+    expect(harness.items).toEqual(completed);
+    expect(harness.items[0]?.revision).toBe(1);
+    expect(harness.items[0]?.classification.status).toBe('pending');
+    expect(classify).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes the same revision after completion is undone', async () => {
+    const { classify, requests } = createControlledClassifier({
+      rejectOnAbort: false,
+    });
+    const harness = createHarness([makeItem()], classify);
+    harness.start();
+    await runReadyWork();
+
+    const completed = completeItem(
+      harness.items,
+      'item-1',
+      new Date(now.getTime() + 1_000).toISOString(),
+    );
+    harness.setItems(completed);
+    expect(requests[0]?.signal.aborted).toBe(true);
+    requests[0]?.resolve(classifiedResult);
+    await runReadyWork();
+
+    expect(harness.items[0]?.classification).toMatchObject({
+      status: 'pending',
+      sourceRevision: 1,
+      nextAttemptAt: null,
+    });
+
+    const restored = undoItemCompletion(harness.items, 'item-1');
+    harness.setItems(restored);
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(restored[0]?.completedAt).toBeUndefined();
+    expect(restored[0]?.revision).toBe(1);
+    expect(classify).toHaveBeenCalledTimes(2);
+    expect(requests[1]?.text).toBe('Milk');
+    expect(harness.items[0]?.revision).toBe(1);
   });
 
   it('aborts every request and timer when stopped', async () => {

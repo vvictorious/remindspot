@@ -6,11 +6,13 @@ import {
 } from './Classification';
 import {
   applyClassificationResult,
+  completeItem,
   createItem,
   deleteItem,
   markClassificationFailed,
   markClassificationPending,
   retryItemClassification,
+  undoItemCompletion,
   updateItemText,
   type ClassificationAttemptSnapshot,
 } from './item-transitions';
@@ -122,6 +124,92 @@ describe('item text transitions', () => {
     expect(updateItemText(items, 'item-1', ' ', editedAt)).toEqual([]);
     expect(deleteItem(items, 'item-1')).toEqual([]);
     expect(deleteItem(items, 'missing')).toBe(items);
+  });
+});
+
+describe('item completion', () => {
+  const completedAt = '2026-10-13T18:00:00.000Z';
+
+  it('completes an item in place without changing its identity', () => {
+    const first = makeItem();
+    const second = createItem('item-2', 'Bread', createdAt);
+    if (second === null) {
+      throw new Error('Test item was not created.');
+    }
+    const items = [first, second];
+
+    const completed = completeItem(items, second.id, completedAt);
+
+    expect(completed.map((item) => item.id)).toEqual(['item-1', 'item-2']);
+    expect(completed[0]).toBe(first);
+    expect(completed[1]).toEqual({
+      ...second,
+      completedAt,
+    });
+    expect(completed[1]?.revision).toBe(second.revision);
+    expect(completed[1]?.classification).toEqual(second.classification);
+    expect(completed[1]?.updatedAt).toBe(second.updatedAt);
+    expect(completeItem(completed, second.id, editedAt)).toBe(completed);
+    expect(completeItem(items, 'missing', completedAt)).toBe(items);
+  });
+
+  it('undoes the most recent completion at its original index', () => {
+    const first = makeItem();
+    const second = createItem('item-2', 'Bread', createdAt);
+    if (second === null) {
+      throw new Error('Test item was not created.');
+    }
+    const completed = completeItem([first, second], second.id, completedAt);
+
+    const restored = undoItemCompletion(completed, second.id);
+
+    expect(restored.map((item) => item.id)).toEqual(['item-1', 'item-2']);
+    expect(restored[0]).toBe(first);
+    expect(restored[1]).toEqual(second);
+    expect(restored[1]?.completedAt).toBeUndefined();
+    expect(restored[1]?.revision).toBe(second.revision);
+    expect(undoItemCompletion(restored, second.id)).toBe(restored);
+  });
+
+  it('ignores classification changes while an item is completed', () => {
+    const { item, attempt: activeAttempt } = startAttempt(makeItem(), 2);
+    const [completed] = completeItem([item], item.id, completedAt);
+    const items = [completed];
+    const result: ItemClassificationResult = {
+      outcome: 'classified',
+      categories: ['grocery-store'],
+      taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+    };
+
+    expect(
+      markClassificationPending(
+        items,
+        item.id,
+        attempt(item, activeAttempt.attemptCount + 1),
+        editedAt,
+      ),
+    ).toBe(items);
+    expect(
+      applyClassificationResult(items, item.id, activeAttempt, result),
+    ).toBe(items);
+    expect(
+      markClassificationFailed(items, item.id, activeAttempt, {
+        retryable: true,
+        failureKind: 'timeout',
+        nextAttemptAt: editedAt,
+      }),
+    ).toBe(items);
+
+    const [failed] = markClassificationFailed([item], item.id, activeAttempt, {
+      retryable: false,
+      failureKind: 'invalid-response',
+      nextAttemptAt: null,
+    });
+    const [completedFailure] = completeItem([failed], failed.id, completedAt);
+    const failedItems = [completedFailure];
+    expect(retryItemClassification(failedItems, failed.id)).toBe(failedItems);
+    expect(failedItems[0]?.revision).toBe(failed.revision);
+    expect(failedItems[0]?.classification).toBe(failed.classification);
   });
 });
 

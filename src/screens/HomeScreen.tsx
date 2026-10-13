@@ -1,8 +1,10 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -15,6 +17,8 @@ import { useItemClassification } from '../hooks/useItemClassification';
 import { useItems } from '../hooks/useItems';
 import { usePlaceCandidates } from '../hooks/usePlaceCandidates';
 
+const UNDO_DISMISS_MS = 5_000;
+
 export function HomeScreen() {
   const {
     items,
@@ -23,11 +27,65 @@ export function HomeScreen() {
     addItem,
     updateItem,
     deleteItem,
+    completeItem,
+    undoItemCompletion,
     retryClassification,
     markClassificationPending,
     applyClassificationResult,
     markClassificationFailed,
   } = useItems();
+  const [undoCompletion, setUndoCompletion] = useState<{
+    id: string;
+    text: string;
+  } | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeItems = items.filter((item) => item.completedAt === undefined);
+
+  const dismissUndo = useCallback(() => {
+    if (undoTimer.current !== null) {
+      clearTimeout(undoTimer.current);
+      undoTimer.current = null;
+    }
+    setUndoCompletion(null);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (undoTimer.current !== null) {
+        clearTimeout(undoTimer.current);
+      }
+    },
+    [],
+  );
+
+  const handleComplete = useCallback(
+    (id: string) => {
+      const item = items.find((candidate) => candidate.id === id);
+      if (item === undefined || item.completedAt !== undefined) {
+        return;
+      }
+
+      completeItem(id);
+      setUndoCompletion({ id: item.id, text: item.text });
+      if (undoTimer.current !== null) {
+        clearTimeout(undoTimer.current);
+      }
+      undoTimer.current = setTimeout(() => {
+        undoTimer.current = null;
+        setUndoCompletion(null);
+      }, UNDO_DISMISS_MS);
+    },
+    [completeItem, items],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (undoCompletion === null) {
+      return;
+    }
+
+    undoItemCompletion(undoCompletion.id);
+    dismissUndo();
+  }, [dismissUndo, undoCompletion, undoItemCompletion]);
 
   useItemClassification({
     items,
@@ -65,9 +123,9 @@ export function HomeScreen() {
         <FlatList
           contentContainerStyle={[
             styles.listContent,
-            items.length === 0 && styles.emptyListContent,
+            activeItems.length === 0 && styles.emptyListContent,
           ]}
-          data={items}
+          data={activeItems}
           keyboardDismissMode={
             Platform.OS === 'ios' ? 'interactive' : 'on-drag'
           }
@@ -80,22 +138,47 @@ export function HomeScreen() {
               </View>
             ) : (
               <View style={styles.emptyState}>
-                <Text style={styles.emptyTitle}>Nothing to remember yet</Text>
-                <Text style={styles.emptyText}>
-                  Add something above and it’ll be here when you need it.
+                <Text style={styles.emptyTitle}>
+                  {items.length > 0
+                    ? 'You\'re all caught up!'
+                    : 'Nothing to remember yet'}
                 </Text>
+                {items.length > 0 ? null : (
+                  <Text style={styles.emptyText}>
+                    Add something above and it’ll be here when you need it.
+                  </Text>
+                )}
               </View>
             )
           }
           renderItem={({ item }) => (
             <ItemRow
               item={item}
+              onComplete={handleComplete}
               onDelete={deleteItem}
               onEdit={updateItem}
               onRetryClassification={retryClassification}
             />
           )}
         />
+        {undoCompletion ? (
+          <View style={styles.undoBanner}>
+            <Text numberOfLines={1} style={styles.undoText}>
+              Completed {undoCompletion.text}
+            </Text>
+            <Pressable
+              accessibilityLabel={`Undo completing ${undoCompletion.text}`}
+              accessibilityRole="button"
+              onPress={handleUndo}
+              style={({ pressed }) => [
+                styles.undoButton,
+                pressed && styles.undoButtonPressed,
+              ]}
+            >
+              <Text style={styles.undoButtonText}>Undo</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -165,5 +248,33 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 21,
     textAlign: 'center',
+  },
+  undoBanner: {
+    marginHorizontal: 22,
+    marginBottom: 12,
+    minHeight: 52,
+    paddingLeft: 16,
+    borderRadius: 16,
+    backgroundColor: '#272621',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  undoText: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 15,
+  },
+  undoButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  undoButtonPressed: {
+    opacity: 0.55,
+  },
+  undoButtonText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
   },
 });
