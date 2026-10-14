@@ -13,6 +13,12 @@ export const PLACE_DISCOVERY_MOVEMENT_THRESHOLD_METERS = 200;
 type Location = PlaceCandidatesRequest['location'];
 type TimerHandle = ReturnType<typeof setTimeout>;
 
+export type CommittedPlaceDiscovery = {
+  anchor: Location;
+  requestItems: readonly PlaceRequestItem[];
+  response: PlaceCandidatesResponse;
+};
+
 export type PlaceDiscoveryState = {
   status:
     | 'idle'
@@ -28,6 +34,7 @@ export type PlaceDiscoveryState = {
   }[];
   error: Error | null;
   canRetry: boolean;
+  committedDiscovery: CommittedPlaceDiscovery | null;
 };
 
 export type PlaceDiscoveryCoordinatorInput = {
@@ -51,6 +58,8 @@ type RequestSnapshot = {
   generation: number;
   itemsSignature: string;
   locationIdentity: string;
+  anchor: Location;
+  requestItems: readonly PlaceRequestItem[];
 };
 
 type PreviousRequest = {
@@ -65,6 +74,7 @@ export const INITIAL_PLACE_DISCOVERY_STATE: PlaceDiscoveryState = {
   categoryFailures: [],
   error: null,
   canRetry: false,
+  committedDiscovery: null,
 };
 
 function itemsSignature(items: readonly PlaceRequestItem[]): string {
@@ -99,6 +109,72 @@ function distanceInMeters(left: Location, right: Location): number {
 
 function locationIdentity(location: Location): string {
   return `${location.latitude},${location.longitude}`;
+}
+
+function copyRequestItems(
+  items: readonly PlaceRequestItem[],
+): readonly PlaceRequestItem[] {
+  return Object.freeze(
+    items.map((item) =>
+      Object.freeze({
+        id: item.id,
+        revision: item.revision,
+        taxonomyVersion: item.taxonomyVersion,
+        categories: Object.freeze([
+          ...item.categories,
+        ]) as PlaceRequestItem['categories'],
+      }),
+    ),
+  );
+}
+
+function freezeDiscovery(discovery: CommittedPlaceDiscovery): void {
+  Object.freeze(discovery.anchor);
+  for (const item of discovery.requestItems) {
+    Object.freeze(item.categories);
+    Object.freeze(item);
+  }
+  Object.freeze(discovery.requestItems);
+  for (const failure of discovery.response.categoryFailures) {
+    Object.freeze(failure);
+  }
+  Object.freeze(discovery.response.categoryFailures);
+  for (const store of discovery.response.stores) {
+    Object.freeze(store.location);
+    Object.freeze(store.itemIds);
+    Object.freeze(store);
+  }
+  Object.freeze(discovery.response.stores);
+  Object.freeze(discovery.response);
+  Object.freeze(discovery);
+}
+
+function commitDiscoveryEnvelope(
+  snapshot: RequestSnapshot,
+  response: PlaceCandidatesResponse,
+): CommittedPlaceDiscovery {
+  const discovery: CommittedPlaceDiscovery = {
+    anchor: snapshot.anchor,
+    requestItems: snapshot.requestItems,
+    response: {
+      status: response.status,
+      stores: response.stores.map((store) => ({
+        placeId: store.placeId,
+        name: store.name,
+        location: {
+          latitude: store.location.latitude,
+          longitude: store.location.longitude,
+        },
+        itemIds: [...store.itemIds],
+      })),
+      categoryFailures: response.categoryFailures.map((failure) => ({
+        category: failure.category,
+        code: failure.code,
+      })),
+    },
+  };
+  freezeDiscovery(discovery);
+  return discovery;
 }
 
 export class PlaceDiscoveryCoordinator {
@@ -169,6 +245,7 @@ export class PlaceDiscoveryCoordinator {
               categoryFailures: [],
               error: null,
               canRetry: false,
+              committedDiscovery: null,
             },
       );
     }
@@ -229,10 +306,7 @@ export class PlaceDiscoveryCoordinator {
   }
 
   private async run(generation: number, force: boolean): Promise<void> {
-    const requestItems: PlaceRequestItem[] = this.input.items.map((item) => ({
-      ...item,
-      categories: [...item.categories] as PlaceRequestItem['categories'],
-    }));
+    const requestItems = copyRequestItems(this.input.items);
     const requestItemsSignature = itemsSignature(requestItems);
     let requestController: AbortController | null = null;
 
@@ -248,15 +322,19 @@ export class PlaceDiscoveryCoordinator {
         return;
       }
 
+      const anchor = Object.freeze({
+        latitude: location.latitude,
+        longitude: location.longitude,
+      });
       const previous = this.previousRequest;
       const reusesLocationIdentity =
         previous !== null &&
         previous.itemsSignature === requestItemsSignature &&
-        distanceInMeters(previous.location, location) <
+        distanceInMeters(previous.location, anchor) <
           PLACE_DISCOVERY_MOVEMENT_THRESHOLD_METERS;
       const currentLocationIdentity = reusesLocationIdentity
         ? previous.locationIdentity
-        : locationIdentity(location);
+        : locationIdentity(anchor);
 
       if (reusesLocationIdentity && !force) {
         return;
@@ -266,12 +344,14 @@ export class PlaceDiscoveryCoordinator {
         generation,
         itemsSignature: requestItemsSignature,
         locationIdentity: currentLocationIdentity,
+        anchor,
+        requestItems,
       };
       requestController = new AbortController();
       this.inFlight = requestController;
       this.previousRequest = {
         itemsSignature: requestItemsSignature,
-        location,
+        location: anchor,
         locationIdentity: currentLocationIdentity,
       };
       this.setState({
@@ -282,14 +362,14 @@ export class PlaceDiscoveryCoordinator {
       });
 
       const response = await this.discover(
-        { items: requestItems, location },
+        { items: [...requestItems], location: anchor },
         { signal: requestController.signal },
       );
       if (!this.isFresh(snapshot, requestController)) {
         return;
       }
 
-      this.applyResponse(response);
+      this.applyResponse(snapshot, response);
     } catch (error) {
       if (
         this.generation !== generation ||
@@ -324,13 +404,17 @@ export class PlaceDiscoveryCoordinator {
     );
   }
 
-  private applyResponse(response: PlaceCandidatesResponse): void {
+  private applyResponse(
+    snapshot: RequestSnapshot,
+    response: PlaceCandidatesResponse,
+  ): void {
     this.setState({
       status: response.status,
       stores: response.stores,
       categoryFailures: response.categoryFailures,
       error: null,
       canRetry: response.status !== 'complete',
+      committedDiscovery: commitDiscoveryEnvelope(snapshot, response),
     });
   }
 

@@ -1,12 +1,10 @@
-import type {
-  PlaceCandidatesResponse,
-  PlaceStore,
-} from '../api/places';
+import type { PlaceStore } from '../api/places';
 import {
   DESTINATION_CATEGORIES,
   type DestinationCategory,
 } from '../models/Classification';
 import type { Item } from '../models/Item';
+import type { CommittedPlaceDiscovery } from './place-discovery-coordinator';
 import {
   createPlaceRequestItemsSignature,
   parsePlaceRequestItemsSignature,
@@ -43,11 +41,7 @@ export type CandidateSnapshotV1 = {
   stores: CandidateSnapshotStoreV1[];
 };
 
-export type CandidateSnapshotDiscovery = {
-  anchor: CandidateCoordinatesV1;
-  requestItems: readonly PlaceRequestItem[];
-  response: PlaceCandidatesResponse;
-};
+export type CandidateSnapshotDiscovery = CommittedPlaceDiscovery;
 
 export type BuildCandidateSnapshotV1Input = {
   generatedAt: string;

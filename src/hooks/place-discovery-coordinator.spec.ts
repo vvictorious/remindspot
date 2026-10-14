@@ -178,6 +178,7 @@ describe('PlaceDiscoveryCoordinator', () => {
       expect(harness.states.at(-1)).toMatchObject({
         status: nextItems.length === 0 ? 'idle' : 'loading',
         stores: [],
+        committedDiscovery: null,
       });
 
       pending.resolve({
@@ -195,6 +196,7 @@ describe('PlaceDiscoveryCoordinator', () => {
       await Promise.resolve();
 
       expect(harness.states.at(-1)?.stores).toEqual([]);
+      expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
     },
   );
 
@@ -219,10 +221,12 @@ describe('PlaceDiscoveryCoordinator', () => {
     harness.update([groceryItem], gate);
     expect(signal?.aborted).toBe(true);
     expect(harness.states.at(-1)?.status).toBe('idle');
+    expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
 
     pending.resolve(completeResponse);
     await Promise.resolve();
     expect(harness.states.at(-1)?.status).toBe('idle');
+    expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
   });
 
   it('clears candidates when the last eligible item leaves and discovers again when it returns', async () => {
@@ -316,11 +320,13 @@ describe('PlaceDiscoveryCoordinator', () => {
     const harness = createHarness({ discover });
     harness.update([groceryItem]);
     await advance();
+    const failedEnvelope = harness.states.at(-1)?.committedDiscovery;
     expect(harness.states.at(-1)).toMatchObject({
       status: 'failed',
       error: null,
       canRetry: true,
     });
+    expect(failedEnvelope?.response.status).toBe('failed');
 
     harness.coordinator.retry();
     await advance(0);
@@ -329,6 +335,7 @@ describe('PlaceDiscoveryCoordinator', () => {
       error: expect.objectContaining({ message: 'network unavailable' }),
       canRetry: true,
     });
+    expect(harness.states.at(-1)?.committedDiscovery).toBe(failedEnvelope);
   });
 
   it('preserves partial stores while an explicit retry is pending', async () => {
@@ -371,5 +378,254 @@ describe('PlaceDiscoveryCoordinator', () => {
     retryResponse.resolve(completeResponse);
     await Promise.resolve();
     expect(harness.states.at(-1)?.status).toBe('complete');
+  });
+
+  describe('committed discovery envelope', () => {
+    const anchor = { latitude: 34.027, longitude: -118.393 };
+    const market = {
+      placeId: 'place-1',
+      name: 'Market',
+      location: { latitude: 34.028, longitude: -118.394 },
+      itemIds: ['item-1'],
+    };
+
+    async function settle() {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    it('commits an immutable envelope for one request and response', async () => {
+      const response: PlaceCandidatesResponse = {
+        status: 'complete',
+        stores: [market],
+        categoryFailures: [],
+      };
+      const requestItems: PlaceRequestItem[] = [
+        {
+          ...groceryItem,
+          categories: ['convenience-store', 'grocery-store'],
+        },
+      ];
+      const harness = createHarness({
+        discover: async (request) => {
+          expect(() => {
+            request.items[0].categories.push('pharmacy');
+          }).toThrow(TypeError);
+          return response;
+        },
+      });
+
+      harness.update(requestItems);
+      await advance();
+
+      const envelope = harness.states.at(-1)?.committedDiscovery;
+      expect(envelope).toEqual({
+        anchor,
+        requestItems,
+        response,
+      });
+      expect(Object.isFrozen(envelope)).toBe(true);
+      expect(Object.isFrozen(envelope?.anchor)).toBe(true);
+      expect(Object.isFrozen(envelope?.requestItems)).toBe(true);
+      expect(Object.isFrozen(envelope?.requestItems[0])).toBe(true);
+      expect(Object.isFrozen(envelope?.requestItems[0].categories)).toBe(true);
+      expect(Object.isFrozen(envelope?.response)).toBe(true);
+      expect(Object.isFrozen(envelope?.response.stores[0])).toBe(true);
+      expect(Object.isFrozen(envelope?.response.stores[0].location)).toBe(true);
+      expect(Object.isFrozen(envelope?.response.stores[0].itemIds)).toBe(true);
+      expect(envelope?.anchor).toBe(harness.discover.mock.calls[0][0].location);
+
+      response.stores[0] = {
+        ...response.stores[0],
+        name: 'Changed after commit',
+      };
+      expect(envelope?.response.stores[0].name).toBe('Market');
+      expect(() => {
+        envelope!.anchor.latitude = 0;
+      }).toThrow(TypeError);
+    });
+
+    it('rejects a stale response instead of pairing it with newer items', async () => {
+      const requests: ReturnType<
+        typeof deferred<PlaceCandidatesResponse>
+      >[] = [];
+      const harness = createHarness({
+        discover: async () => {
+          const pending = deferred<PlaceCandidatesResponse>();
+          requests.push(pending);
+          return pending.promise;
+        },
+      });
+
+      harness.update([groceryItem]);
+      await advance();
+      harness.update([{ ...groceryItem, revision: 2 }]);
+      await advance();
+      expect(harness.states.at(-1)).toMatchObject({
+        status: 'loading',
+        committedDiscovery: null,
+      });
+
+      requests[0].resolve({
+        status: 'complete',
+        stores: [{ ...market, placeId: 'stale-place', name: 'Stale Store' }],
+        categoryFailures: [],
+      });
+      await settle();
+      expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
+
+      requests[1].resolve({
+        status: 'complete',
+        stores: [{ ...market, placeId: 'fresh-place', name: 'Fresh Store' }],
+        categoryFailures: [],
+      });
+      await settle();
+
+      expect(harness.states.at(-1)?.committedDiscovery).toEqual({
+        anchor,
+        requestItems: [{ ...groceryItem, revision: 2 }],
+        response: {
+          status: 'complete',
+          stores: [
+            { ...market, placeId: 'fresh-place', name: 'Fresh Store' },
+          ],
+          categoryFailures: [],
+        },
+      });
+    });
+
+    it('clears a committed envelope immediately when items change', async () => {
+      const replacement = deferred<PlaceCandidatesResponse>();
+      const discover = vi
+        .fn()
+        .mockResolvedValueOnce({
+          status: 'complete',
+          stores: [market],
+          categoryFailures: [],
+        })
+        .mockReturnValueOnce(replacement.promise);
+      const harness = createHarness({ discover });
+
+      harness.update([groceryItem]);
+      await advance();
+      expect(harness.states.at(-1)?.committedDiscovery?.response.stores).toEqual([
+        market,
+      ]);
+
+      harness.update([{ ...groceryItem, revision: 2 }]);
+      expect(harness.states.at(-1)).toMatchObject({
+        status: 'loading',
+        stores: [],
+        committedDiscovery: null,
+      });
+
+      await advance();
+      replacement.resolve({
+        status: 'complete',
+        stores: [{ ...market, placeId: 'replacement', itemIds: ['item-1'] }],
+        categoryFailures: [],
+      });
+      await settle();
+
+      expect(harness.states.at(-1)?.committedDiscovery).toMatchObject({
+        requestItems: [{ id: 'item-1', revision: 2 }],
+        response: {
+          stores: [{ placeId: 'replacement', itemIds: ['item-1'] }],
+        },
+      });
+      expect(
+        harness.states.at(-1)?.committedDiscovery?.response.stores,
+      ).not.toEqual([market]);
+    });
+
+    it('does not commit an envelope when the app backgrounds during discovery', async () => {
+      const pending = deferred<PlaceCandidatesResponse>();
+      const harness = createHarness({
+        discover: async () => pending.promise,
+      });
+
+      harness.update([groceryItem]);
+      await advance();
+      harness.update([groceryItem], { isForeground: false });
+      expect(harness.states.at(-1)).toMatchObject({
+        status: 'idle',
+        committedDiscovery: null,
+      });
+
+      pending.resolve({
+        status: 'complete',
+        stores: [{ ...market, placeId: 'background-stale' }],
+        categoryFailures: [],
+      });
+      await settle();
+      expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
+
+      harness.update([groceryItem], { isForeground: true });
+      await advance();
+      expect(harness.discover).toHaveBeenCalledOnce();
+      expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
+    });
+
+    it('commits partial discovery separately and replaces that envelope atomically', async () => {
+      const partialResponse: PlaceCandidatesResponse = {
+        status: 'partial',
+        stores: [market],
+        categoryFailures: [
+          { category: 'pharmacy', code: 'provider-error' },
+        ],
+      };
+      const completeReplacement: PlaceCandidatesResponse = {
+        status: 'complete',
+        stores: [
+          {
+            ...market,
+            placeId: 'place-2',
+            name: 'Pharmacy',
+            itemIds: ['item-1', 'item-2'],
+          },
+        ],
+        categoryFailures: [],
+      };
+      const retry = deferred<PlaceCandidatesResponse>();
+      const requestItems: PlaceRequestItem[] = [
+        groceryItem,
+        { ...groceryItem, id: 'item-2', categories: ['pharmacy'] },
+      ];
+      const discover = vi
+        .fn()
+        .mockResolvedValueOnce(partialResponse)
+        .mockReturnValueOnce(retry.promise);
+      const harness = createHarness({ discover });
+
+      harness.update(requestItems);
+      await advance();
+      const partialEnvelope = harness.states.at(-1)?.committedDiscovery;
+      expect(partialEnvelope).toEqual({
+        anchor,
+        requestItems,
+        response: partialResponse,
+      });
+      expect(Object.isFrozen(partialEnvelope?.response.categoryFailures)).toBe(
+        true,
+      );
+
+      harness.coordinator.retry();
+      await advance(0);
+      expect(harness.states.at(-1)).toMatchObject({
+        status: 'loading',
+        stores: [market],
+      });
+      expect(harness.states.at(-1)?.committedDiscovery).toBe(partialEnvelope);
+
+      retry.resolve(completeReplacement);
+      await settle();
+      expect(harness.states.at(-1)?.committedDiscovery).toEqual({
+        anchor,
+        requestItems,
+        response: completeReplacement,
+      });
+      expect(harness.states.at(-1)?.committedDiscovery).not.toBe(
+        partialEnvelope,
+      );
+    });
   });
 });

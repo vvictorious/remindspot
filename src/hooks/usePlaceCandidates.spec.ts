@@ -2,6 +2,7 @@ import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PlaceCandidatesResponse } from '../api/places';
 import { DESTINATION_TAXONOMY_VERSION } from '../models/Classification';
 import type { DestinationCategory } from '../models/Classification';
 import type { Item } from '../models/Item';
@@ -262,6 +263,24 @@ describe('usePlaceCandidates', () => {
       ],
       canRetry: true,
       retry: expect.any(Function),
+      committedDiscovery: {
+        anchor: { latitude: 34.027, longitude: -118.393 },
+        requestItems: [
+          {
+            id: 'item-1',
+            revision: 1,
+            taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+            categories: ['grocery-store', 'pharmacy'],
+          },
+        ],
+        response: {
+          status: 'partial',
+          stores: [{ placeId: 'place-1', itemIds: ['item-1', 'item-2'] }],
+          categoryFailures: [
+            { category: 'pharmacy', code: 'provider-error' },
+          ],
+        },
+      },
     });
   });
 
@@ -359,5 +378,136 @@ describe('usePlaceCandidates', () => {
         ],
       }),
     );
+  });
+
+  it('exposes the committed discovery envelope for a successful request', async () => {
+    const response: PlaceCandidatesResponse = {
+      status: 'complete',
+      stores: [
+        {
+          placeId: 'place-1',
+          name: 'Market',
+          location: { latitude: 34.03, longitude: -118.39 },
+          itemIds: ['item-1'],
+        },
+      ],
+      categoryFailures: [],
+    };
+    mocks.findPlaceCandidates.mockResolvedValue(response);
+    let latestResult: UsePlaceCandidatesResult | undefined;
+
+    await render({
+      isLoadingItems: false,
+      items: [classifiedItem()],
+      onResult: (result) => {
+        latestResult = result;
+      },
+    });
+    expect(latestResult?.committedDiscovery).toBeNull();
+
+    await advanceDiscovery();
+
+    expect(latestResult?.committedDiscovery).toEqual({
+      anchor: { latitude: 34.027, longitude: -118.393 },
+      requestItems: [
+        {
+          id: 'item-1',
+          revision: 1,
+          taxonomyVersion: DESTINATION_TAXONOMY_VERSION,
+          categories: ['grocery-store'],
+        },
+      ],
+      response,
+    });
+    expect(Object.isFrozen(latestResult?.committedDiscovery)).toBe(true);
+  });
+
+  it('drops the envelope when an edit supersedes in-flight discovery', async () => {
+    let resolveRequest: ((value: PlaceCandidatesResponse) => void) | undefined;
+    mocks.findPlaceCandidates.mockImplementation(
+      () =>
+        new Promise<PlaceCandidatesResponse>((resolve) => {
+          resolveRequest = resolve;
+        }),
+    );
+    const item = classifiedItem();
+    let latestResult: UsePlaceCandidatesResult | undefined;
+    await render({
+      isLoadingItems: false,
+      items: [item],
+      onResult: (result) => {
+        latestResult = result;
+      },
+    });
+    await advanceDiscovery();
+
+    await update({
+      isLoadingItems: false,
+      items: [pendingEdit(item)],
+    });
+    expect(latestResult?.committedDiscovery).toBeNull();
+
+    await act(async () => {
+      resolveRequest?.({
+        status: 'complete',
+        stores: [
+          {
+            placeId: 'stale-place',
+            name: 'Stale Store',
+            location: { latitude: 34.027, longitude: -118.393 },
+            itemIds: ['item-1'],
+          },
+        ],
+        categoryFailures: [],
+      });
+    });
+    await flushEffects();
+
+    expect(latestResult?.committedDiscovery).toBeNull();
+    expect(latestResult?.stores).toEqual([]);
+  });
+
+  it('does not publish a stale envelope when discovery is backgrounded', async () => {
+    let resolveRequest: ((value: PlaceCandidatesResponse) => void) | undefined;
+    mocks.findPlaceCandidates.mockImplementation(
+      () =>
+        new Promise<PlaceCandidatesResponse>((resolve) => {
+          resolveRequest = resolve;
+        }),
+    );
+    let latestResult: UsePlaceCandidatesResult | undefined;
+    await render({
+      isLoadingItems: false,
+      items: [classifiedItem()],
+      onResult: (result) => {
+        latestResult = result;
+      },
+    });
+    await advanceDiscovery();
+
+    await act(async () => mocks.appStateListener?.('background'));
+    await flushEffects();
+    expect(latestResult).toMatchObject({
+      status: 'idle',
+      committedDiscovery: null,
+    });
+
+    await act(async () => {
+      resolveRequest?.({
+        status: 'complete',
+        stores: [
+          {
+            placeId: 'background-stale',
+            name: 'Stale Store',
+            location: { latitude: 34.027, longitude: -118.393 },
+            itemIds: ['item-1'],
+          },
+        ],
+        categoryFailures: [],
+      });
+    });
+    await flushEffects();
+
+    expect(latestResult?.committedDiscovery).toBeNull();
   });
 });
