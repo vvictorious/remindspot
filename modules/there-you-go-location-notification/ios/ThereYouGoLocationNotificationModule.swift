@@ -23,9 +23,126 @@ struct ScheduledLocationNotificationRecord: Record {
   @Field var repeats: Bool = false
 }
 
+struct CandidateCoordinateRecord: Record {
+  @Field var latitude: Double = 0
+  @Field var longitude: Double = 0
+}
+
+struct CandidateCoordinateInputRecord: Record {
+  @Field var latitude: Double? = nil
+  @Field var longitude: Double? = nil
+}
+
+struct CandidateSnapshotItemInputRecord: Record {
+  @Field var id: String? = nil
+  @Field var revision: Int? = nil
+  @Field var text: String? = nil
+  @Field var categories: [String]? = nil
+}
+
+struct CandidateSnapshotStoreInputRecord: Record {
+  @Field var placeId: String? = nil
+  @Field var name: String? = nil
+  @Field var location: CandidateCoordinateInputRecord? = nil
+  @Field var itemIds: [String]? = nil
+}
+
+struct CandidateSnapshotInputRecord: Record {
+  @Field var schemaVersion: Int? = nil
+  @Field var generatedAt: String? = nil
+  @Field var discoveryAnchor: CandidateCoordinateInputRecord? = nil
+  @Field var items: [CandidateSnapshotItemInputRecord]? = nil
+  @Field var stores: [CandidateSnapshotStoreInputRecord]? = nil
+}
+
+struct CandidateSnapshotItemRecord: Record {
+  @Field var id: String = ""
+  @Field var revision: Int = 0
+  @Field var text: String = ""
+  @Field var categories: [String] = []
+}
+
+struct CandidateSnapshotStoreRecord: Record {
+  @Field var placeId: String = ""
+  @Field var name: String = ""
+  @Field var location: CandidateCoordinateRecord = CandidateCoordinateRecord()
+  @Field var itemIds: [String] = []
+}
+
+struct CandidateSnapshotRecord: Record {
+  @Field var schemaVersion: Int = 0
+  @Field var generatedAt: String = ""
+  @Field var discoveryAnchor: CandidateCoordinateRecord = CandidateCoordinateRecord()
+  @Field var items: [CandidateSnapshotItemRecord] = []
+  @Field var stores: [CandidateSnapshotStoreRecord] = []
+}
+
+struct NativeItemReferenceRecord: Record {
+  @Field var id: String = ""
+  @Field var revision: Int = 0
+}
+
+struct NativeRequestStateRecord: Record {
+  @Field var placeId: String = ""
+  @Field var installationId: String = ""
+  @Field var fingerprint: String = ""
+  @Field var status: String = ""
+  @Field var items: [NativeItemReferenceRecord] = []
+  @Field var isPending: Bool = false
+}
+
+struct NativeGeofenceStateRecord: Record {
+  @Field var schemaVersion: Int = GeofenceNotificationConstants.stateSchemaVersion
+  @Field var snapshot: CandidateSnapshotRecord?
+  @Field var requests: [NativeRequestStateRecord] = []
+  @Field var selectedPlaceIds: [String] = []
+  @Field var pendingManagedRequestIds: [String] = []
+  @Field var isDegraded: Bool = false
+}
+
+struct NativeSyncFailureRecord: Record {
+  @Field var placeId: String = ""
+  @Field var code: String = ""
+  @Field var message: String = ""
+}
+
+struct NativeSyncResultRecord: Record {
+  @Field var scheduledPlaceIds: [String] = []
+  @Field var unchangedPlaceIds: [String] = []
+  @Field var canceledPlaceIds: [String] = []
+  @Field var consumedPlaceIds: [String] = []
+  @Field var retainedFallbackPlaceIds: [String] = []
+  @Field var failures: [NativeSyncFailureRecord] = []
+  @Field var state: NativeGeofenceStateRecord = NativeGeofenceStateRecord()
+}
+
 public class ThereYouGoLocationNotificationModule: Module {
+  private let reconciler = ThereYouGoLocationNotificationReconciler()
+
   public func definition() -> ModuleDefinition {
     Name("ThereYouGoLocationNotification")
+
+    let reconciler = reconciler
+
+    AsyncFunction("syncAsync") {
+      (snapshotRecord: CandidateSnapshotInputRecord) async throws -> NativeSyncResultRecord in
+      do {
+        let snapshot = try CandidateSnapshotValidator.validate(snapshotRecord)
+        let report = try await reconciler.sync(snapshot: snapshot)
+        return makeSyncResultRecord(report)
+      } catch {
+        throw GenericException(error.localizedDescription)
+      }
+    }
+
+    AsyncFunction("getStateAsync") {
+      () async throws -> NativeGeofenceStateRecord in
+      do {
+        return makeStateRecord(try await reconciler.getState())
+      } catch {
+        throw GenericException(error.localizedDescription)
+      }
+    }
 
     AsyncFunction("scheduleAsync") {
       (request: LocationNotificationRequestRecord) async throws -> String in
@@ -77,7 +194,7 @@ public class ThereYouGoLocationNotificationModule: Module {
         return nil
       }
 
-      var result = ScheduledLocationNotificationRecord()
+      let result = ScheduledLocationNotificationRecord()
       result.identifier = request.identifier
       result.title = request.content.title
       result.body = request.content.body
@@ -97,4 +214,85 @@ public class ThereYouGoLocationNotificationModule: Module {
       return !requests.contains(where: { $0.identifier == identifier })
     }
   }
+}
+
+private func makeSyncResultRecord(
+  _ report: NativeSyncReport
+) -> NativeSyncResultRecord {
+  let result = NativeSyncResultRecord()
+  result.scheduledPlaceIds = report.scheduledPlaceIds
+  result.unchangedPlaceIds = report.unchangedPlaceIds
+  result.canceledPlaceIds = report.canceledPlaceIds
+  result.consumedPlaceIds = report.consumedPlaceIds
+  result.retainedFallbackPlaceIds = report.retainedFallbackPlaceIds
+  result.failures = report.failures.map { failure in
+    let record = NativeSyncFailureRecord()
+    record.placeId = failure.placeId
+    record.code = failure.code
+    record.message = failure.message
+    return record
+  }
+  result.state = makeStateRecord(report.state)
+  return result
+}
+
+private func makeStateRecord(
+  _ state: NativeGeofenceStateView
+) -> NativeGeofenceStateRecord {
+  let record = NativeGeofenceStateRecord()
+  record.snapshot = state.snapshot.map(makeSnapshotRecord)
+  record.requests = state.requests.map { request in
+    let requestRecord = NativeRequestStateRecord()
+    requestRecord.placeId = request.placeId
+    requestRecord.installationId = request.installationId
+    requestRecord.fingerprint = request.fingerprint
+    requestRecord.status = request.status.rawValue
+    requestRecord.items = request.itemReferences.map { item in
+      let itemRecord = NativeItemReferenceRecord()
+      itemRecord.id = item.id
+      itemRecord.revision = item.revision
+      return itemRecord
+    }
+    requestRecord.isPending = request.isPending
+    return requestRecord
+  }
+  record.selectedPlaceIds = state.selectedPlaceIds
+  record.pendingManagedRequestIds = state.pendingManagedRequestIds
+  record.isDegraded = state.isDegraded
+  return record
+}
+
+private func makeSnapshotRecord(
+  _ snapshot: PersistedCandidateSnapshot
+) -> CandidateSnapshotRecord {
+  let record = CandidateSnapshotRecord()
+  record.schemaVersion = snapshot.schemaVersion
+  record.generatedAt = snapshot.generatedAt
+  record.discoveryAnchor = makeCoordinateRecord(snapshot.discoveryAnchor)
+  record.items = snapshot.items.map { item in
+    let itemRecord = CandidateSnapshotItemRecord()
+    itemRecord.id = item.id
+    itemRecord.revision = item.revision
+    itemRecord.text = item.text
+    itemRecord.categories = item.categories
+    return itemRecord
+  }
+  record.stores = snapshot.stores.map { store in
+    let storeRecord = CandidateSnapshotStoreRecord()
+    storeRecord.placeId = store.placeId
+    storeRecord.name = store.name
+    storeRecord.location = makeCoordinateRecord(store.location)
+    storeRecord.itemIds = store.itemIds
+    return storeRecord
+  }
+  return record
+}
+
+private func makeCoordinateRecord(
+  _ coordinate: PersistedCoordinate
+) -> CandidateCoordinateRecord {
+  let record = CandidateCoordinateRecord()
+  record.latitude = coordinate.latitude
+  record.longitude = coordinate.longitude
+  return record
 }
