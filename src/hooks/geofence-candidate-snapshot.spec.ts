@@ -141,7 +141,7 @@ describe('geofence candidate snapshots', () => {
     );
 
     expect(CANDIDATE_SNAPSHOT_SCHEMA_VERSION).toBe(1);
-    expect(GEOFENCE_RADIUS_METERS).toBe(150);
+    expect(GEOFENCE_RADIUS_METERS).toBe(100);
     expect(snapshot).toEqual({
       schemaVersion: 1,
       generatedAt: GENERATED_AT,

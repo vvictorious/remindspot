@@ -5,7 +5,8 @@ import {
 import type { CandidateSnapshotV1 } from '../hooks/geofence-candidate-snapshot';
 
 export const NATIVE_CANDIDATE_SCHEMA_VERSION = 1;
-export const NATIVE_GEOFENCE_RADIUS_METERS = 150;
+export const NATIVE_GEOFENCE_RADIUS_METERS = 100;
+export const NATIVE_DUPLICATE_STORE_DISTANCE_METERS = 30;
 export const NATIVE_MAX_MONITORED_STORES = 15;
 export const NATIVE_MAX_LOCATION_TRIGGERS = 20;
 export const NATIVE_MANAGED_IDENTIFIER_PREFIX = 'tyg.arrival.v1.';
@@ -148,6 +149,64 @@ function distanceInMeters(
     earthRadiusMeters *
     Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
   );
+}
+
+function normalizedBusinessIdentity(name: string): string {
+  const tokens =
+    name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLocaleLowerCase('en-US')
+      .replace(/['’]/g, '')
+      .match(/[\p{L}\p{N}]+/gu) ?? [];
+  const lastToken = tokens.at(-1);
+  if (lastToken === 'pharmacy' || lastToken === 'drugstore') {
+    tokens.pop();
+  }
+  return tokens.join(' ');
+}
+
+function representativeStorePrecedes(
+  left: NativeContractStore,
+  right: NativeContractStore,
+): number {
+  const lengthDifference =
+    Array.from(left.name.trim()).length - Array.from(right.name.trim()).length;
+  return lengthDifference || compareStrings(left.placeId, right.placeId);
+}
+
+function collapseDuplicateStores(
+  stores: readonly NativeContractStore[],
+): NativeContractStore[] {
+  const collapsed: NativeContractStore[] = [];
+
+  for (const store of [...stores].sort(representativeStorePrecedes)) {
+    const identity = normalizedBusinessIdentity(store.name);
+    const duplicateIndex =
+      identity.length === 0
+        ? -1
+        : collapsed.findIndex(
+            (candidate) =>
+              normalizedBusinessIdentity(candidate.name) === identity &&
+              distanceInMeters(candidate.location, store.location) <=
+                NATIVE_DUPLICATE_STORE_DISTANCE_METERS,
+          );
+
+    if (duplicateIndex === -1) {
+      collapsed.push(store);
+      continue;
+    }
+
+    const representative = collapsed[duplicateIndex];
+    collapsed[duplicateIndex] = {
+      ...representative,
+      itemIds: [...new Set([...representative.itemIds, ...store.itemIds])].sort(
+        compareStrings,
+      ),
+    };
+  }
+
+  return collapsed;
 }
 
 function concise(value: string, maximumLength: number): string {
@@ -298,7 +357,7 @@ export function selectNearestNativeStores(
   const validated = validateNativeCandidateSnapshot(snapshot);
   const itemsById = new Map(validated.items.map((item) => [item.id, item]));
 
-  return validated.stores
+  return collapseDuplicateStores(validated.stores)
     .flatMap((store) => {
       const items = store.itemIds
         .flatMap((itemId) => {

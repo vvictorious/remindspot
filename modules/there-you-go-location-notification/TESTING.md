@@ -46,7 +46,7 @@ console or a temporary debug screen:
    - `state.selectedPlaceIds` should contain both stores.
    - `state.requests` should have `tyg.arrival.v1.` installation IDs, `status: "pending"`, and `isPending: true`.
 3. Call `getScheduledAsync(installationId)` for each request.
-   - Radius is 150.
+   - Radius is 100.
    - `notifyOnEntry` is true, `notifyOnExit` is false, `repeats` is false.
    - Title is `At <store name>`.
    - Body lists the associated item names.
@@ -69,6 +69,32 @@ console or a temporary debug screen:
 
 Use far-away coordinates for diagnostic steps 2-8 so you do not trigger live
 notifications. Use a real nearby store only for step 9.
+
+## 100-meter migration and duplicate-store verification
+
+1. With a build that still uses 150 meters, schedule requests while outside all
+   test regions and record their installation IDs.
+2. Install the 100-meter build over the existing app without deleting its data,
+   then launch it and wait for item hydration and geofence sync.
+   - Each selected pending store gets a fresh installation ID.
+   - `getScheduledAsync` reports radius 100 for every replacement.
+   - The old 150-meter IDs are absent, sync has no failures, and
+     `isDegraded` is false.
+3. Sync co-located `CVS` and `CVS Pharmacy` candidates no more than 30 meters
+   apart, with different associated items.
+   - Only the deterministic representative is selected and pending.
+   - Its body and `itemIds` contain the union of both stores' items.
+4. Add a differently named business at the same coordinate and an equivalent
+   business name more than 30 meters away.
+   - Both remain independently selected.
+5. Background or force-quit the app, disconnect Metro, and verify that entering
+   a 100-meter region still produces the one-shot notification.
+
+Consumed entries are same-fingerprint tombstones. Because radius participates
+in the fingerprint, changing from 150 to 100 meters treats an already consumed
+entry as changed content and rearms it once at the new radius. This is accepted
+for the development-stage migration; no schema or one-off migration logic is
+required.
 
 ## Correctness regression scenarios
 

@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
     },
   ),
   getStateAsync: vi.fn(),
+  getScheduledAsync: vi.fn(),
   syncAsync: vi.fn(),
 }));
 
@@ -56,6 +57,7 @@ vi.mock(
   () => ({
     default: {
       getStateAsync: mocks.getStateAsync,
+      getScheduledAsync: mocks.getScheduledAsync,
       syncAsync: mocks.syncAsync,
     },
   }),
@@ -137,6 +139,7 @@ describe('useGeofenceScheduling', () => {
     mocks.getPermissionsAsync.mockResolvedValue({ status: 'denied' });
     mocks.requestPermissionsAsync.mockResolvedValue({ status: 'granted' });
     currentSnapshot = null;
+    mocks.getScheduledAsync.mockResolvedValue(null);
     mocks.getStateAsync.mockImplementation(async () => ({
       schemaVersion: 1,
       snapshot: currentSnapshot,

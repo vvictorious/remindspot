@@ -10,7 +10,8 @@ import UserNotifications
 enum GeofenceNotificationConstants {
   static let stateSchemaVersion = 1
   static let candidateSchemaVersion = 1
-  static let radiusMeters = 150.0
+  static let radiusMeters = 100.0
+  static let duplicateStoreDistanceMeters = 30.0
   static let maximumSelectedStores = 15
   static let maximumLocationTriggers = 20
   static let managedIdentifierPrefix = "tyg.arrival.v1."
@@ -1028,7 +1029,7 @@ actor ThereYouGoLocationNotificationReconciler {
       longitude: snapshot.discoveryAnchor.longitude
     )
 
-    return try snapshot.stores.compactMap { store in
+    return try collapseDuplicateStores(snapshot.stores).compactMap { store in
       let items = store.itemIds.compactMap { itemsById[$0] }.sorted {
         $0.id < $1.id
       }
@@ -1075,6 +1076,76 @@ actor ThereYouGoLocationNotificationReconciler {
       }
       return left.placeId < right.placeId
     }
+  }
+
+  private func collapseDuplicateStores(
+    _ stores: [PersistedCandidateStore]
+  ) -> [PersistedCandidateStore] {
+    let orderedStores = stores.sorted(by: representativeStorePrecedes)
+    var collapsed: [PersistedCandidateStore] = []
+
+    for store in orderedStores {
+      let identity = normalizedBusinessIdentity(store.name)
+      guard
+        !identity.isEmpty,
+        let duplicateIndex = collapsed.firstIndex(where: { candidate in
+          normalizedBusinessIdentity(candidate.name) == identity &&
+            distanceBetween(candidate.location, store.location) <=
+              GeofenceNotificationConstants.duplicateStoreDistanceMeters
+        })
+      else {
+        collapsed.append(store)
+        continue
+      }
+
+      let representative = collapsed[duplicateIndex]
+      collapsed[duplicateIndex] = PersistedCandidateStore(
+        placeId: representative.placeId,
+        name: representative.name,
+        location: representative.location,
+        itemIds: Array(Set(representative.itemIds + store.itemIds)).sorted()
+      )
+    }
+
+    return collapsed
+  }
+
+  private func representativeStorePrecedes(
+    _ left: PersistedCandidateStore,
+    _ right: PersistedCandidateStore
+  ) -> Bool {
+    let leftName = left.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let rightName = right.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    if leftName.count != rightName.count {
+      return leftName.count < rightName.count
+    }
+    return left.placeId < right.placeId
+  }
+
+  private func normalizedBusinessIdentity(_ name: String) -> String {
+    let folded = name.folding(
+      options: [.caseInsensitive, .diacriticInsensitive],
+      locale: Locale(identifier: "en_US_POSIX")
+    )
+    let withoutApostrophes = folded
+      .replacingOccurrences(of: "'", with: "")
+      .replacingOccurrences(of: "’", with: "")
+    var tokens = withoutApostrophes
+      .components(separatedBy: CharacterSet.alphanumerics.inverted)
+      .filter { !$0.isEmpty }
+    if let last = tokens.last, last == "pharmacy" || last == "drugstore" {
+      tokens.removeLast()
+    }
+    return tokens.joined(separator: " ")
+  }
+
+  private func distanceBetween(
+    _ left: PersistedCoordinate,
+    _ right: PersistedCoordinate
+  ) -> CLLocationDistance {
+    CLLocation(latitude: left.latitude, longitude: left.longitude).distance(
+      from: CLLocation(latitude: right.latitude, longitude: right.longitude)
+    )
   }
 
   private func requestFingerprint(

@@ -13,6 +13,9 @@ import type { CommittedPlaceDiscovery } from './place-discovery-coordinator';
 
 type NativeSchedulingClient = {
   getStateAsync: () => Promise<NativeGeofenceState>;
+  getScheduledAsync: (
+    identifier: string,
+  ) => Promise<{ radius: number } | null>;
   syncAsync: (
     snapshot: ReturnType<typeof toNativeCandidateSnapshot>,
   ) => Promise<NativeSyncResult>;
@@ -97,6 +100,35 @@ function asCandidateSnapshot(
   return snapshot as CandidateSnapshotV1;
 }
 
+function pendingStoreLogDetails(
+  state: NativeGeofenceState,
+): Record<string, unknown> {
+  const itemsById = new Map(
+    state.snapshot?.items.map((item) => [item.id, item.text]) ?? [],
+  );
+
+  return {
+    isDegraded: state.isDegraded,
+    stores: state.requests
+      .filter((request) => request.status === 'pending' && request.isPending)
+      .map((request) => {
+        const store = state.snapshot?.stores.find(
+          (candidate) => candidate.placeId === request.placeId,
+        );
+
+        return {
+          name: store?.name ?? null,
+          latitude: store?.location.latitude ?? null,
+          longitude: store?.location.longitude ?? null,
+          selected: state.selectedPlaceIds.includes(request.placeId),
+          items: request.items
+            .map((item) => itemsById.get(item.id) ?? item.id)
+            .join(', '),
+        };
+      }),
+  };
+}
+
 export class GeofenceSchedulingCoordinator {
   private readonly nativeClient: NativeSchedulingClient;
   private readonly onStatusChange: (
@@ -130,6 +162,7 @@ export class GeofenceSchedulingCoordinator {
     this.onStatusChange({ status: 'initializing' });
     this.enqueue(async () => {
       await this.refreshNativeState('initialized');
+      await this.logInstalledRadii();
       this.isInitialized = true;
       this.requestReconcile();
     });
@@ -220,6 +253,49 @@ export class GeofenceSchedulingCoordinator {
     });
   }
 
+  private async logInstalledRadii(): Promise<void> {
+    if (
+      typeof __DEV__ === 'undefined' ||
+      !__DEV__ ||
+      !this.isStarted ||
+      this.nativeState === null
+    ) {
+      return;
+    }
+
+    const state = this.nativeState;
+    try {
+      const stores = await Promise.all(
+        state.requests
+          .filter(
+            (request) => request.status === 'pending' && request.isPending,
+          )
+          .map(async (request) => {
+            const scheduled = await this.nativeClient.getScheduledAsync(
+              request.installationId,
+            );
+            const store = state.snapshot?.stores.find(
+              (candidate) => candidate.placeId === request.placeId,
+            );
+
+            return {
+              name: store?.name ?? null,
+              radiusMeters: scheduled?.radius ?? null,
+            };
+          }),
+      );
+      if (!this.isStarted) {
+        return;
+      }
+
+      this.log?.('info', 'installed radii', { stores });
+    } catch (error) {
+      this.log?.('warn', 'installed radii unavailable', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async reconcileLatest(): Promise<void> {
     if (this.nativeState === null || !this.input.isHydrated) {
       return;
@@ -305,5 +381,6 @@ export class GeofenceSchedulingCoordinator {
       pendingRequestCount: state.pendingManagedRequestIds.length,
       isDegraded: state.isDegraded,
     });
+    this.log?.('info', 'pending stores', pendingStoreLogDetails(state));
   }
 }

@@ -6,6 +6,7 @@ import {
   buildNativeNotificationBody,
   classifyNativeRequestTransition,
   NATIVE_CANDIDATE_SCHEMA_VERSION,
+  NATIVE_DUPLICATE_STORE_DISTANCE_METERS,
   NATIVE_GEOFENCE_RADIUS_METERS,
   NATIVE_MANAGED_IDENTIFIER_PREFIX,
   NATIVE_MAX_LOCATION_TRIGGERS,
@@ -89,7 +90,8 @@ describe('native geofence contract', () => {
       stores: [{ placeId: 'whole-foods', itemIds: ['item-milk'] }],
     });
     expect(DESTINATION_TAXONOMY_VERSION).toBe(1);
-    expect(NATIVE_GEOFENCE_RADIUS_METERS).toBe(150);
+    expect(NATIVE_GEOFENCE_RADIUS_METERS).toBe(100);
+    expect(NATIVE_DUPLICATE_STORE_DISTANCE_METERS).toBe(30);
     expect(NATIVE_MAX_MONITORED_STORES).toBe(15);
     expect(NATIVE_MAX_LOCATION_TRIGGERS).toBe(20);
     expect(NATIVE_MANAGED_IDENTIFIER_PREFIX).toBe('tyg.arrival.v1.');
@@ -202,8 +204,122 @@ describe('native geofence contract', () => {
       'store-13',
       'store-14',
     ]);
-    expect(selected.every((entry) => entry.fingerprintInput.radiusMeters === 150)).toBe(
+    expect(selected.every((entry) => entry.fingerprintInput.radiusMeters === 100)).toBe(
       true,
+    );
+  });
+
+  it('collapses co-located equivalent businesses and preserves every item', () => {
+    const stores = [
+      {
+        ...store(
+          'cvs-pharmacy-place',
+          ['item-milk'],
+          { latitude: ANCHOR.latitude + 0.0001, longitude: ANCHOR.longitude },
+        ),
+        name: 'CVS Pharmacy',
+      },
+      {
+        ...store('cvs-place', ['item-batteries'], ANCHOR),
+        name: 'CVS',
+      },
+    ];
+    const input = snapshot({
+      items: [
+        item('item-milk', 'Milk'),
+        item('item-batteries', 'Batteries'),
+      ],
+      stores,
+    });
+
+    const selected = selectNearestNativeStores(input);
+    const selectedFromReversedInput = selectNearestNativeStores({
+      ...input,
+      stores: [...stores].reverse(),
+    });
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toMatchObject({
+      placeId: 'cvs-place',
+      name: 'CVS',
+      itemIds: ['item-batteries', 'item-milk'],
+      body: 'Batteries • Milk',
+      fingerprintInput: {
+        placeId: 'cvs-place',
+        name: 'CVS',
+        radiusMeters: 100,
+        items: [
+          { id: 'item-batteries', revision: 1, text: 'Batteries' },
+          { id: 'item-milk', revision: 1, text: 'Milk' },
+        ],
+      },
+    });
+    expect(selectedFromReversedInput).toEqual(selected);
+  });
+
+  it('keeps different businesses and equivalent businesses beyond 30 meters separate', () => {
+    const selected = selectNearestNativeStores(
+      snapshot({
+        stores: [
+          {
+            ...store('cvs', ['item-milk'], ANCHOR),
+            name: 'CVS Pharmacy',
+          },
+          {
+            ...store('medicine-shoppe', ['item-milk'], ANCHOR),
+            name: 'The Medicine Shoppe Pharmacy',
+          },
+          {
+            ...store('walgreens', ['item-milk'], {
+              latitude: ANCHOR.latitude + 0.001,
+              longitude: ANCHOR.longitude,
+            }),
+            name: 'Walgreens',
+          },
+          {
+            ...store('walgreens-pharmacy', ['item-milk'], {
+              latitude: ANCHOR.latitude + 0.0014,
+              longitude: ANCHOR.longitude,
+            }),
+            name: 'Walgreens Pharmacy',
+          },
+        ],
+      }),
+    );
+
+    expect(selected.map((entry) => entry.placeId)).toEqual([
+      'cvs',
+      'medicine-shoppe',
+      'walgreens',
+      'walgreens-pharmacy',
+    ]);
+  });
+
+  it('collapses duplicates before applying the nearest-15 limit', () => {
+    const stores = Array.from({ length: 16 }, (_, index) => ({
+      ...store(
+        `store-${index.toString().padStart(2, '0')}`,
+        ['item-milk'],
+        {
+          latitude: ANCHOR.latitude + index * 0.001,
+          longitude: ANCHOR.longitude,
+        },
+      ),
+      name: `store-${index.toString().padStart(2, '0')} Market`,
+    }));
+    stores.push({
+      ...store('duplicate-store-00', ['item-milk'], ANCHOR),
+      name: 'store-00 Market Pharmacy',
+    });
+
+    const selected = selectNearestNativeStores(snapshot({ stores }));
+
+    expect(selected).toHaveLength(15);
+    expect(selected.map((entry) => entry.placeId)).toEqual(
+      Array.from(
+        { length: 15 },
+        (_, index) => `store-${index.toString().padStart(2, '0')}`,
+      ),
     );
   });
 
@@ -342,5 +458,27 @@ describe('native geofence contract', () => {
         },
       }),
     ).toBe('content-change');
+  });
+
+  it('replaces pending and consumed requests whose fingerprint still uses the old radius', () => {
+    const [desired] = selectNearestNativeStores(snapshot());
+    const oldRadiusFingerprint = {
+      ...desired.fingerprintInput,
+      radiusMeters: 150,
+    };
+
+    for (const status of ['pending', 'consumed'] as const) {
+      expect(
+        classifyNativeRequestTransition({
+          desired,
+          existing: {
+            status,
+            isPending: status === 'pending',
+            fingerprintInput: oldRadiusFingerprint,
+            itemReferences: desired.itemReferences,
+          },
+        }),
+      ).toBe('content-change');
+    }
   });
 });

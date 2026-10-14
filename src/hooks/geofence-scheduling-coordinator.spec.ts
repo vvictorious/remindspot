@@ -137,6 +137,9 @@ function createHarness(
 ) {
   let currentState = initialState;
   const getStateAsync = vi.fn(async () => currentState);
+  const getScheduledAsync = vi.fn<(identifier: string) => Promise<{ radius: number } | null>>(
+    async () => null,
+  );
   const syncAsync = vi.fn(
     syncImplementation ??
       (async (snapshot: NativeCandidateSnapshot) => {
@@ -145,14 +148,15 @@ function createHarness(
         return result;
       }),
   );
+  const log = vi.fn();
   const dependencies: GeofenceSchedulingCoordinatorDependencies = {
-    nativeClient: { getStateAsync, syncAsync },
+    nativeClient: { getStateAsync, getScheduledAsync, syncAsync },
     now: () => NOW,
-    log: vi.fn(),
+    log,
   };
   const coordinator = new GeofenceSchedulingCoordinator(dependencies);
 
-  return { coordinator, getStateAsync, syncAsync };
+  return { coordinator, getStateAsync, getScheduledAsync, syncAsync, log };
 }
 
 describe('GeofenceSchedulingCoordinator', () => {
@@ -355,5 +359,149 @@ describe('GeofenceSchedulingCoordinator', () => {
       items: snapshot.items,
       stores: snapshot.stores,
     });
+  });
+
+  it('logs only genuinely pending stores with names, coordinates, and item text', async () => {
+    const milk = classifiedItem('milk', 'Milk');
+    const bread = classifiedItem('bread', 'Bread');
+    const snapshot = storedSnapshot([milk, bread]);
+    snapshot.stores.push({
+      placeId: 'ralphs',
+      name: 'Ralphs',
+      location: { latitude: 34.0257, longitude: -118.433 },
+      itemIds: ['milk', 'bread'],
+    });
+    const harness = createHarness({
+      schemaVersion: 1,
+      snapshot,
+      selectedPlaceIds: ['ralphs'],
+      pendingManagedRequestIds: ['tyg.arrival.v1.ralphs'],
+      isDegraded: false,
+      requests: [
+        {
+          placeId: 'ralphs',
+          installationId: 'tyg.arrival.v1.ralphs',
+          fingerprint: 'ralphs-fingerprint',
+          status: 'pending',
+          isPending: true,
+          items: [
+            { id: 'milk', revision: 1 },
+            { id: 'bread', revision: 1 },
+          ],
+        },
+        {
+          placeId: 'market',
+          installationId: 'tyg.arrival.v1.market',
+          fingerprint: 'market-fingerprint',
+          status: 'pending',
+          isPending: false,
+          items: [{ id: 'milk', revision: 1 }],
+        },
+        {
+          placeId: 'market',
+          installationId: 'tyg.arrival.v1.consumed',
+          fingerprint: 'consumed-fingerprint',
+          status: 'consumed',
+          isPending: true,
+          items: [{ id: 'milk', revision: 1 }],
+        },
+      ],
+    });
+
+    harness.coordinator.start();
+    await settle();
+
+    expect(harness.getScheduledAsync).not.toHaveBeenCalled();
+    expect(harness.log).toHaveBeenCalledWith('info', 'pending stores', {
+      isDegraded: false,
+      stores: [
+        {
+          name: 'Ralphs',
+          latitude: 34.0257,
+          longitude: -118.433,
+          selected: true,
+          items: 'Milk, Bread',
+        },
+      ],
+    });
+  });
+
+  it('logs each pending store name and installed radius once after initialization', async () => {
+    vi.stubGlobal('__DEV__', true);
+    try {
+      const milk = classifiedItem('milk', 'Milk');
+      const snapshot = storedSnapshot([milk]);
+      snapshot.stores.push({
+        placeId: 'cvs',
+        name: 'CVS',
+        location: { latitude: 34.02, longitude: -118.43 },
+        itemIds: ['milk'],
+      });
+      const harness = createHarness({
+        schemaVersion: 1,
+        snapshot,
+        selectedPlaceIds: ['market', 'cvs'],
+        pendingManagedRequestIds: [
+          'tyg.arrival.v1.market',
+          'tyg.arrival.v1.cvs',
+        ],
+        isDegraded: false,
+        requests: [
+          {
+            placeId: 'market',
+            installationId: 'tyg.arrival.v1.market',
+            fingerprint: 'market-fingerprint',
+            status: 'pending',
+            isPending: true,
+            items: [{ id: 'milk', revision: 1 }],
+          },
+          {
+            placeId: 'cvs',
+            installationId: 'tyg.arrival.v1.cvs',
+            fingerprint: 'cvs-fingerprint',
+            status: 'pending',
+            isPending: true,
+            items: [{ id: 'milk', revision: 1 }],
+          },
+          {
+            placeId: 'fired',
+            installationId: 'tyg.arrival.v1.fired',
+            fingerprint: 'fired-fingerprint',
+            status: 'consumed',
+            isPending: false,
+            items: [{ id: 'milk', revision: 1 }],
+          },
+        ],
+      });
+      harness.getScheduledAsync.mockImplementation(async (identifier: string) =>
+        identifier.endsWith('.cvs') ? { radius: 100 } : { radius: 150 },
+      );
+
+      harness.coordinator.start();
+      await settle();
+
+      expect(harness.getScheduledAsync.mock.calls.map(([id]) => id)).toEqual([
+        'tyg.arrival.v1.market',
+        'tyg.arrival.v1.cvs',
+      ]);
+      expect(harness.log).toHaveBeenCalledWith('info', 'installed radii', {
+        stores: [
+          { name: 'Market', radiusMeters: 150 },
+          { name: 'CVS', radiusMeters: 100 },
+        ],
+      });
+
+      harness.coordinator.resume();
+      harness.coordinator.update({
+        items: [milk],
+        isHydrated: true,
+        committedDiscovery: discovery([milk]),
+      });
+      await settle();
+
+      expect(harness.getScheduledAsync).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

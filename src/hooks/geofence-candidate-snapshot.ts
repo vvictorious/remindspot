@@ -12,7 +12,7 @@ import {
 } from './place-item-projection';
 
 export const CANDIDATE_SNAPSHOT_SCHEMA_VERSION = 1 as const;
-export const GEOFENCE_RADIUS_METERS = 150;
+export const GEOFENCE_RADIUS_METERS = 100;
 
 export type CandidateCoordinatesV1 = {
   latitude: number;
