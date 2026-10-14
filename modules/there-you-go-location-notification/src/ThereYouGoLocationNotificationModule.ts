@@ -1,4 +1,4 @@
-import { NativeModule, requireNativeModule } from 'expo';
+import { requireOptionalNativeModule } from 'expo';
 
 export type LocationNotificationRequest = {
   identifier: string;
@@ -83,7 +83,7 @@ export type NativeSyncResult = {
   state: NativeGeofenceState;
 };
 
-declare class ThereYouGoLocationNotificationModule extends NativeModule {
+export type ThereYouGoLocationNotificationModule = {
   scheduleAsync(request: LocationNotificationRequest): Promise<string>;
   getScheduledAsync(
     identifier: string,
@@ -91,8 +91,8 @@ declare class ThereYouGoLocationNotificationModule extends NativeModule {
   cancelAsync(identifier: string): Promise<boolean>;
   syncAsync(snapshot: NativeCandidateSnapshot): Promise<NativeSyncResult>;
   getStateAsync(): Promise<NativeGeofenceState>;
-}
+};
 
-export default requireNativeModule<ThereYouGoLocationNotificationModule>(
+export default requireOptionalNativeModule<ThereYouGoLocationNotificationModule>(
   'ThereYouGoLocationNotification',
 );

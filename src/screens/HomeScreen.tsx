@@ -13,6 +13,7 @@ import {
 
 import { ItemInput } from '../components/ItemInput';
 import { ItemRow } from '../components/ItemRow';
+import { useGeofenceScheduling } from '../hooks/useGeofenceScheduling';
 import { useItemClassification } from '../hooks/useItemClassification';
 import { useItems } from '../hooks/useItems';
 import { usePlaceCandidates } from '../hooks/usePlaceCandidates';
@@ -95,9 +96,14 @@ export function HomeScreen() {
     markClassificationFailed,
   });
 
-  usePlaceCandidates({
+  const placeCandidates = usePlaceCandidates({
     isLoadingItems: isLoading,
     items,
+  });
+  useGeofenceScheduling({
+    isLoadingItems: isLoading,
+    items,
+    committedDiscovery: placeCandidates.committedDiscovery,
   });
 
   return (

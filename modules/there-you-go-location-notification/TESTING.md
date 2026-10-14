@@ -17,39 +17,58 @@ Swift remains the runtime source of truth. The TypeScript contract file document
 
 ## Manual iPhone verification
 
-Use a development build. Do not wire HomeScreen. Call the module from a temporary Metro console, a one-off debug screen, or `jscmd` in the debugger.
+Use a development build. `HomeScreen` now drives the native reconciler from
+hydrated items and complete committed Places discovery.
 
 1. Grant notification permission and When In Use location. Do not request Always.
-2. `await ThereYouGoLocationNotification.getStateAsync()`
+2. Start Metro with the API URL reachable from the iPhone, add a destination
+   item, and wait for classification and Places discovery.
+   - Metro logs a `[geofence] sync complete` entry.
+   - The entry reports at least one `scheduledPlaceId` and no failures.
+3. Background or force-quit the app, then enter one of the scheduled stores.
+   - Expect one notification titled `At <store name>`.
+   - The body lists the associated active item names.
+4. Complete, delete, or edit an associated item before entering the store.
+   - Metro logs cancellation or replacement of the obsolete schedule.
+   - The obsolete item text must not appear in a later notification.
+5. Undo completion.
+   - The old candidate is not restored until fresh Places discovery completes.
+
+For lower-level reconciliation diagnostics, call the module from the Metro
+console or a temporary debug screen:
+
+1. On a fresh install, call
+   `await ThereYouGoLocationNotification.getStateAsync()`.
    - Expect `snapshot: null`, empty `requests`, `isDegraded: false`.
-3. Sync a far-away two-store snapshot (for example, coordinates several kilometers from your current location) with two items on store A and one item on store B.
+2. Sync a far-away two-store snapshot (for example, coordinates several kilometers from your current location) with two items on store A and one item on store B.
    - `syncAsync` should report both store IDs in `scheduledPlaceIds`.
    - `state.snapshot.stores` should contain the full pool.
    - `state.selectedPlaceIds` should contain both stores.
    - `state.requests` should have `tyg.arrival.v1.` installation IDs, `status: "pending"`, and `isPending: true`.
-4. Call `getScheduledAsync(installationId)` for each request.
+3. Call `getScheduledAsync(installationId)` for each request.
    - Radius is 150.
    - `notifyOnEntry` is true, `notifyOnExit` is false, `repeats` is false.
    - Title is `At <store name>`.
    - Body lists the associated item names.
-5. Sync the identical snapshot again.
+4. Sync the identical snapshot again.
    - `unchangedPlaceIds` contains both stores.
    - Installation IDs do not change.
-6. Sync a snapshot that completes/removes one item from store A.
+5. Sync a snapshot that completes/removes one item from store A.
    - Store A is canceled first, then scheduled with a new installation ID and only the remaining item text.
    - Store B is unchanged.
-7. Sync an authoritative empty snapshot (`items: []`, `stores: []`).
+6. Sync an authoritative empty snapshot (`items: []`, `stores: []`).
    - All managed requests are canceled.
    - Unrelated pending notifications created with `scheduleAsync` remain.
-8. Sync 16 stores at increasing distances.
+7. Sync 16 stores at increasing distances.
    - `state.snapshot.stores.length === 16`
    - `state.selectedPlaceIds.length === 15`
    - Only the 15 nearest pending IDs are present.
-9. Sync the original two-store snapshot, force-quit the app, relaunch, then `getStateAsync()`.
+8. Sync the original two-store snapshot, force-quit the app, relaunch, then `getStateAsync()`.
    - The persisted snapshot and pending IDs match the last successful sync.
-10. After a real arrival, `getScheduledAsync` returns `null` and a later identical `syncAsync` reports the store in `consumedPlaceIds` without creating a new request.
+9. After a real arrival, `getScheduledAsync` returns `null` and a later identical `syncAsync` reports the store in `consumedPlaceIds` without creating a new request.
 
-Use far-away coordinates for steps 3-9 so you do not trigger live notifications. Use a real nearby store only for step 10.
+Use far-away coordinates for diagnostic steps 2-8 so you do not trigger live
+notifications. Use a real nearby store only for step 9.
 
 ## Correctness regression scenarios
 
