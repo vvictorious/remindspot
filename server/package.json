@@ -19,6 +19,7 @@
     "test:e2e": "vitest run test",
     "typecheck": "tsc --noEmit",
     "eval:classification": "tsc -p evaluation/tsconfig.json && node dist-evaluation/evaluation/classification/run.js",
+    "eval:matching": "tsc -p evaluation/tsconfig.json && node dist-evaluation/evaluation/matching/run.js",
     "eval:classification:gemini": "tsc -p evaluation/tsconfig.json && node dist-evaluation/evaluation/classification/run-gemini.js"
   },
   "engines": {

@@ -5,7 +5,7 @@ This Expo module has no XCTest target. The generated `/ios` project is gitignore
 Covered without a device:
 
 - TypeScript snapshot construction (`src/hooks/geofence-candidate-snapshot.spec.ts`)
-- Portable native contract checks (`src/native/geofence-native-contract.spec.ts`): validation, nearest-15 selection, notification copy, and transition classification
+- Portable native contract checks (`src/native/geofence-native-contract.spec.ts`): validation, item-aware 15-store selection, notification copy, and transition classification
 
 Not covered without a physical iPhone:
 
@@ -59,10 +59,13 @@ console or a temporary debug screen:
 6. Sync an authoritative empty snapshot (`items: []`, `stores: []`).
    - All managed requests are canceled.
    - Unrelated pending notifications created with `scheduleAsync` remain.
-7. Sync 16 stores at increasing distances.
-   - `state.snapshot.stores.length === 16`
+7. Sync 17 stores: 15 nearby stores for one common item, then a farther
+   auto-parts store and pet store for two otherwise uncovered items.
+   - `state.snapshot.stores.length === 17`
    - `state.selectedPlaceIds.length === 15`
-   - Only the 15 nearest pending IDs are present.
+   - The two specialist stores and the 13 nearest common-item stores are
+     selected, in distance order.
+   - Only those 15 pending IDs are present.
 8. Sync the original two-store snapshot, force-quit the app, relaunch, then `getStateAsync()`.
    - The persisted snapshot and pending IDs match the last successful sync.
 9. After a real arrival, `getScheduledAsync` returns `null` and a later identical `syncAsync` reports the store in `consumedPlaceIds` without creating a new request.

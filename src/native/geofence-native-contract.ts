@@ -357,7 +357,7 @@ export function selectNearestNativeStores(
   const validated = validateNativeCandidateSnapshot(snapshot);
   const itemsById = new Map(validated.items.map((item) => [item.id, item]));
 
-  return collapseDuplicateStores(validated.stores)
+  const ranked = collapseDuplicateStores(validated.stores)
     .flatMap((store) => {
       const items = store.itemIds
         .flatMap((itemId) => {
@@ -406,8 +406,50 @@ export function selectNearestNativeStores(
       (left, right) =>
         left.distanceMeters - right.distanceMeters ||
         compareStrings(left.placeId, right.placeId),
-    )
-    .slice(0, NATIVE_MAX_MONITORED_STORES);
+    );
+  const remaining = [...ranked];
+  const selected: DesiredNativeStore[] = [];
+  const uncoveredItemIds = new Set(
+    ranked.flatMap((store) => store.itemIds),
+  );
+
+  while (
+    selected.length < NATIVE_MAX_MONITORED_STORES &&
+    uncoveredItemIds.size > 0
+  ) {
+    let bestIndex = -1;
+    let bestCoverage = 0;
+
+    for (const [index, store] of remaining.entries()) {
+      const coverage = store.itemIds.filter((itemId) =>
+        uncoveredItemIds.has(itemId),
+      ).length;
+      if (coverage > bestCoverage) {
+        bestIndex = index;
+        bestCoverage = coverage;
+      }
+    }
+
+    if (bestIndex === -1) {
+      break;
+    }
+
+    const [store] = remaining.splice(bestIndex, 1);
+    selected.push(store);
+    for (const itemId of store.itemIds) {
+      uncoveredItemIds.delete(itemId);
+    }
+  }
+
+  selected.push(
+    ...remaining.slice(0, NATIVE_MAX_MONITORED_STORES - selected.length),
+  );
+
+  return selected.sort(
+    (left, right) =>
+      left.distanceMeters - right.distanceMeters ||
+      compareStrings(left.placeId, right.placeId),
+  );
 }
 
 export function classifyNativeRequestTransition(input: {

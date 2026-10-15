@@ -169,7 +169,7 @@ describe('native geofence contract', () => {
     ).toEqual([]);
   });
 
-  it('selects the 15 nearest eligible stores and keeps deterministic ties', () => {
+  it('fills remaining slots with the nearest stores and keeps deterministic ties', () => {
     const items = [item('item-milk', 'Milk')];
     const stores = Array.from({ length: 18 }, (_, index) => {
       const row = Math.floor(index / 2);
@@ -207,6 +207,97 @@ describe('native geofence contract', () => {
     expect(selected.every((entry) => entry.fingerprintInput.radiusMeters === 100)).toBe(
       true,
     );
+  });
+
+  it('prioritizes deterministic item coverage before nearest-store fill', () => {
+    const commonStores = Array.from({ length: 14 }, (_, index) =>
+      store(
+        `common-${index.toString().padStart(2, '0')}`,
+        ['item-common'],
+        {
+          latitude: ANCHOR.latitude + (index + 1) * 0.001,
+          longitude: ANCHOR.longitude,
+        },
+      ),
+    );
+    const specialistStores = [
+      store(
+        'nearer-item-a',
+        ['item-a'],
+        {
+          latitude: ANCHOR.latitude + 0.02,
+          longitude: ANCHOR.longitude,
+        },
+      ),
+      store(
+        'nearer-item-b',
+        ['item-b'],
+        {
+          latitude: ANCHOR.latitude + 0.021,
+          longitude: ANCHOR.longitude,
+        },
+      ),
+      store(
+        'farther-multi-item',
+        ['item-a', 'item-b'],
+        {
+          latitude: ANCHOR.latitude + 0.022,
+          longitude: ANCHOR.longitude,
+        },
+      ),
+    ];
+    const input = snapshot({
+      items: [
+        item('item-common', 'Common item'),
+        item('item-a', 'Item A'),
+        item('item-b', 'Item B'),
+      ],
+      stores: [...specialistStores, ...commonStores].reverse(),
+    });
+
+    const selected = selectNearestNativeStores(input);
+    const selectedAgain = selectNearestNativeStores({
+      ...input,
+      stores: [...input.stores].reverse(),
+    });
+
+    expect(selected).toHaveLength(15);
+    expect(selected.map((entry) => entry.placeId)).toEqual([
+      ...commonStores.map((entry) => entry.placeId),
+      'farther-multi-item',
+    ]);
+    expect(
+      new Set(selected.flatMap((entry) => entry.itemIds)),
+    ).toEqual(new Set(['item-common', 'item-a', 'item-b']));
+    expect(selected.map((entry) => entry.placeId)).not.toContain(
+      'nearer-item-a',
+    );
+    expect(selected.map((entry) => entry.placeId)).not.toContain(
+      'nearer-item-b',
+    );
+    expect(selectedAgain).toEqual(selected);
+  });
+
+  it('uses distance and placeId when more distinct items exist than slots', () => {
+    const items = Array.from({ length: 16 }, (_, index) =>
+      item(`item-${index.toString().padStart(2, '0')}`, `Item ${index}`),
+    );
+    const stores = items.map((entry, index) =>
+      store(`store-${index.toString().padStart(2, '0')}`, [entry.id], {
+        latitude: ANCHOR.latitude + Math.floor(index / 2) * 0.01,
+        longitude: ANCHOR.longitude,
+      }),
+    );
+
+    const selected = selectNearestNativeStores(
+      snapshot({ items, stores: [...stores].reverse() }),
+    );
+
+    expect(selected.map((entry) => entry.placeId)).toEqual(
+      stores.slice(0, NATIVE_MAX_MONITORED_STORES).map((entry) => entry.placeId),
+    );
+    expect(new Set(selected.flatMap((entry) => entry.itemIds)).size).toBe(15);
+    expect(selected.flatMap((entry) => entry.itemIds)).not.toContain('item-15');
   });
 
   it('collapses co-located equivalent businesses and preserves every item', () => {
@@ -295,7 +386,7 @@ describe('native geofence contract', () => {
     ]);
   });
 
-  it('collapses duplicates before applying the nearest-15 limit', () => {
+  it('collapses duplicates before applying the 15-store limit', () => {
     const stores = Array.from({ length: 16 }, (_, index) => ({
       ...store(
         `store-${index.toString().padStart(2, '0')}`,

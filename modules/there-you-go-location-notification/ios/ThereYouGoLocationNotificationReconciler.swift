@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import UserNotifications
 
-// Runtime owner of snapshot validation, nearest-15 selection, persistence, and
+// Runtime owner of snapshot validation, item-aware selection, persistence, and
 // UNUserNotificationCenter reconciliation. This repository has no XCTest target
 // for local Expo modules; see TESTING.md for the manual device procedure.
 
@@ -1029,7 +1029,9 @@ actor ThereYouGoLocationNotificationReconciler {
       longitude: snapshot.discoveryAnchor.longitude
     )
 
-    return try collapseDuplicateStores(snapshot.stores).compactMap { store in
+    let ranked: [DesiredStoreNotification] =
+      try collapseDuplicateStores(snapshot.stores).compactMap {
+        (store: PersistedCandidateStore) -> DesiredStoreNotification? in
       let items = store.itemIds.compactMap { itemsById[$0] }.sorted {
         $0.id < $1.id
       }
@@ -1070,11 +1072,63 @@ actor ThereYouGoLocationNotificationReconciler {
         fingerprint: fingerprint,
         snapshotGeneratedAt: snapshot.generatedAt
       )
-    }.sorted { left, right in
+    }.sorted {
+      (left: DesiredStoreNotification, right: DesiredStoreNotification) in
       if left.distanceMeters != right.distanceMeters {
         return left.distanceMeters < right.distanceMeters
       }
       return left.placeId < right.placeId
+    }
+
+    var remaining = ranked
+    var selected: [DesiredStoreNotification] = []
+    var uncoveredItemIds: Set<String> = Set(
+      ranked.flatMap { store in store.itemIds }
+    )
+
+    while
+      selected.count < GeofenceNotificationConstants.maximumSelectedStores,
+      !uncoveredItemIds.isEmpty
+    {
+      var bestIndex: Int?
+      var bestCoverage = 0
+
+      for (index, store) in remaining.enumerated() {
+        let coverage = store.itemIds.reduce(into: 0) { count, itemId in
+          if uncoveredItemIds.contains(itemId) {
+            count += 1
+          }
+        }
+        if coverage > bestCoverage {
+          bestIndex = index
+          bestCoverage = coverage
+        }
+      }
+
+      guard let bestIndex else {
+        break
+      }
+
+      let store = remaining.remove(at: bestIndex)
+      selected.append(store)
+      uncoveredItemIds.subtract(store.itemIds)
+    }
+
+    selected.append(
+      contentsOf: remaining.prefix(
+        GeofenceNotificationConstants.maximumSelectedStores - selected.count
+      )
+    )
+    selected.sort { left, right in
+      if left.distanceMeters != right.distanceMeters {
+        return left.distanceMeters < right.distanceMeters
+      }
+      return left.placeId < right.placeId
+    }
+    let selectedPlaceIds = Set(selected.map(\.placeId))
+
+    return selected + ranked.filter {
+      !selectedPlaceIds.contains($0.placeId)
     }
   }
 

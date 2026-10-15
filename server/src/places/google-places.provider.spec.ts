@@ -112,6 +112,95 @@ describe('GooglePlacesProvider', () => {
     },
   );
 
+  it('keeps operational places and places that omit admission fields', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          places: [
+            {
+              id: 'operational-place',
+              displayName: { text: 'Open Market' },
+              location: { latitude: 34.01, longitude: -118.41 },
+              businessStatus: 'OPERATIONAL',
+              pureServiceAreaBusiness: false,
+            },
+            {
+              id: 'unspecified-place',
+              displayName: { text: 'Neighborhood Shop' },
+              location: { latitude: 34.02, longitude: -118.42 },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new GooglePlacesProvider(
+      new ConfigService({ GOOGLE_PLACES_API_KEY: 'test-key' }),
+    );
+
+    await expect(
+      provider.search({
+        categories: ['grocery-store'],
+        location: { latitude: 34, longitude: -118.4 },
+      }),
+    ).resolves.toEqual([
+      {
+        id: 'operational-place',
+        name: 'Open Market',
+        location: { latitude: 34.01, longitude: -118.41 },
+      },
+      {
+        id: 'unspecified-place',
+        name: 'Neighborhood Shop',
+        location: { latitude: 34.02, longitude: -118.42 },
+      },
+    ]);
+  });
+
+  it('drops closed and service-area-only places', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          places: [
+            {
+              id: 'temporarily-closed',
+              displayName: { text: 'Closed for the Week' },
+              location: { latitude: 34.01, longitude: -118.41 },
+              businessStatus: 'CLOSED_TEMPORARILY',
+            },
+            {
+              id: 'permanently-closed',
+              displayName: { text: 'Former Market' },
+              location: { latitude: 34.02, longitude: -118.42 },
+              businessStatus: 'CLOSED_PERMANENTLY',
+              pureServiceAreaBusiness: false,
+            },
+            {
+              id: 'service-area-only',
+              displayName: { text: 'Mobile Supplement Co' },
+              location: { latitude: 34.03, longitude: -118.43 },
+              businessStatus: 'OPERATIONAL',
+              pureServiceAreaBusiness: true,
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new GooglePlacesProvider(
+      new ConfigService({ GOOGLE_PLACES_API_KEY: 'test-key' }),
+    );
+
+    await expect(
+      provider.search({
+        categories: ['pharmacy'],
+        location: { latitude: 34, longitude: -118.4 },
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it('fails clearly without a configured API key', async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal('fetch', fetchMock);

@@ -16,9 +16,14 @@ import type {
 export const GOOGLE_NEARBY_SEARCH_URL =
   'https://places.googleapis.com/v1/places:searchNearby';
 export const GOOGLE_PLACES_FIELD_MASK =
-  'places.id,places.displayName,places.location';
+  'places.id,places.displayName,places.location,places.businessStatus,places.pureServiceAreaBusiness';
 export const NEARBY_SEARCH_RADIUS_METERS = 3218.688;
 export const NEARBY_CANDIDATE_LIMIT = 5;
+
+const CLOSED_BUSINESS_STATUSES = new Set([
+  'CLOSED_TEMPORARILY',
+  'CLOSED_PERMANENTLY',
+]);
 
 interface GoogleNearbySearchResponse {
   places?: GooglePlace[];
@@ -33,6 +38,8 @@ interface GooglePlace {
     latitude?: number;
     longitude?: number;
   };
+  businessStatus?: string;
+  pureServiceAreaBusiness?: boolean;
 }
 
 @Injectable()
@@ -111,7 +118,9 @@ export class GooglePlacesProvider implements PlacesProvider {
           !id ||
           !displayName?.text ||
           typeof location?.latitude !== 'number' ||
-          typeof location.longitude !== 'number'
+          typeof location.longitude !== 'number' ||
+          CLOSED_BUSINESS_STATUSES.has(place.businessStatus ?? '') ||
+          place.pureServiceAreaBusiness === true
         ) {
           return [];
         }
