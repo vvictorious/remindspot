@@ -83,6 +83,97 @@ export type NativeSyncResult = {
   state: NativeGeofenceState;
 };
 
+export type ArrivalDiagnosticEvent = {
+  sequence: number;
+  type: string;
+  recordedAt: string;
+  appState: string;
+  detail: string | null;
+  locationTimestamp: string | null;
+  horizontalAccuracyMeters: number | null;
+  speedMetersPerSecond: number | null;
+  speedAccuracyMetersPerSecond: number | null;
+  distanceFromStoreMeters: number | null;
+  sampleAgeSeconds: number | null;
+  isFreshLocation: boolean | null;
+  executionDurationSeconds: number | null;
+  activityStartTimestamp: string | null;
+  activityAutomotive: boolean | null;
+  activityStationary: boolean | null;
+  activityWalking: boolean | null;
+  activityRunning: boolean | null;
+  activityUnknown: boolean | null;
+  activityCycling: boolean | null;
+  activityConfidence: string | null;
+  observationIdentifier: string | null;
+};
+
+export type ArrivalDiagnosticStatus = {
+  buildEnabled: boolean;
+  isArmed: boolean;
+  authorizationStatus: string;
+  accuracyAuthorization: string;
+  backgroundRefreshStatus: string;
+  backgroundModeEnabled: boolean;
+  regionMonitoringAvailable: boolean;
+  diagnosticRegionRegistered: boolean;
+  serviceSessionSupported: boolean;
+  serviceSessionActive: boolean;
+  liveUpdatesSupported: boolean;
+  observationActive: boolean;
+  observationDeadline: string | null;
+  observationDurationSeconds: number;
+  /** @deprecated Use observationActive. */
+  burstActive: boolean;
+  pendingLocationNotificationCount: number;
+  monitoredRegionCount: number;
+  conservativeOccupiedRegionCount: number;
+  regionLimit: number;
+  storeIdentifier: string;
+  storeName: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  /** @deprecated Use observationDurationSeconds. */
+  burstDurationSeconds: number;
+  motionAvailable: boolean;
+  motionAuthorizationStatus: string;
+};
+
+export type ArrivalDiagnosticResults = {
+  schemaVersion: number;
+  storeIdentifier: string;
+  storeName: string;
+  radiusMeters: number;
+  isArmed: boolean;
+  events: ArrivalDiagnosticEvent[];
+};
+
+export type ArrivalDiagnosticHistoryConfidence =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'unknown';
+
+export type ArrivalDiagnosticActivitySample = {
+  activityStartTimestamp: string;
+  automotive: boolean;
+  stationary: boolean;
+  walking: boolean;
+  running: boolean;
+  cycling: boolean;
+  unknown: boolean;
+  confidence: ArrivalDiagnosticHistoryConfidence;
+};
+
+export type ArrivalDiagnosticHistoryQuery = {
+  outcome: 'activities' | 'no-activity';
+  from: string;
+  to: string;
+  detail: string | null;
+  activities: ArrivalDiagnosticActivitySample[];
+};
+
 export type ThereYouGoLocationNotificationModule = {
   scheduleAsync(request: LocationNotificationRequest): Promise<string>;
   getScheduledAsync(
@@ -91,6 +182,15 @@ export type ThereYouGoLocationNotificationModule = {
   cancelAsync(identifier: string): Promise<boolean>;
   syncAsync(snapshot: NativeCandidateSnapshot): Promise<NativeSyncResult>;
   getStateAsync(): Promise<NativeGeofenceState>;
+  armArrivalDiagnosticAsync(): Promise<ArrivalDiagnosticStatus>;
+  getArrivalDiagnosticStatusAsync(): Promise<ArrivalDiagnosticStatus>;
+  getArrivalDiagnosticResultsAsync(): Promise<ArrivalDiagnosticResults>;
+  clearArrivalDiagnosticResultsAsync(): Promise<ArrivalDiagnosticResults>;
+  disableArrivalDiagnosticAsync(): Promise<ArrivalDiagnosticStatus>;
+  queryArrivalActivityHistoryAsync(
+    from: string,
+    to: string,
+  ): Promise<ArrivalDiagnosticHistoryQuery>;
 };
 
 export default requireOptionalNativeModule<ThereYouGoLocationNotificationModule>(

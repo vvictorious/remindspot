@@ -147,51 +147,126 @@ This validates the core rotating-local-window architecture: native iOS can maint
 
 The hard-coded Area A/Area B plan, dual-radius UI, test-only bridge methods, and debug receipt were removed after the result was recorded. The generic native module for scheduling, inspecting, and canceling location notifications remains. Production rotation should reintroduce the validated native lifecycle pattern only after destination selection and persistence contracts are deliberately designed.
 
-## Broader visit-detection hypothesis
+## Milestone 7C — iOS 18+ Core Location lifecycle diagnostic
 
 ### Hypothesis
 
-An iPhone can provide enough background location and motion evidence to distinguish a genuine store visit from passing near a store with useful reliability, including while the app is backgrounded or the phone is locked.
+After a native 100-meter region-entry callback, a foreground-established
+`CLServiceSession(.always)` plus default `CLLocationUpdate.liveUpdates()` may
+observe parking-to-walking after the initial UIKit background assertion has
+expired, while ThereYouGo is backgrounded or the phone is locked.
 
-This spike collects raw, timestamped observations around a small set of hard-coded test locations. It will not implement a production classifier.
+This is a feasibility diagnostic, not an arrival classifier or product
+notification path. It does not suppress, delay, replace, or reschedule any
+existing `UNLocationNotificationTrigger`.
+
+### Isolated implementation
+
+- Diagnostic functionality is compiled inactive unless
+  `TYG_IOS_ARRIVAL_DIAGNOSTIC=1` is present during Expo prebuild.
+- Arming requires iOS 18 or later and an active foreground app. Older systems
+  return an explicit unsupported-version error. The app's iOS 16.4 deployment
+  target is unchanged through availability isolation.
+- The opt-in build enables the iOS Location Updates background mode and uses
+  explicit Always-location and Motion & Fitness purpose strings. The default
+  build retains the original configuration. Motion has no extra background
+  mode.
+- Exactly one `CLCircularRegion` is registered at `34.0203234,
+  -118.4220680` (Trader Joe's #119, 3456 S Sepulveda Blvd, Los Angeles, CA
+  90034; verified 2026-10-19 against the official store page and OpenStreetMap
+  node 276600064), with a 100-meter radius and identifier
+  `tyg.diagnostic.arrival.v1.trader-joes-119` outside the production
+  `tyg.arrival.v1.` namespace. Arming or launch retires any older diagnostic
+  identifier, including Shell Food Mart, without clearing its persisted events.
+- Before arming, native code conservatively unions pending
+  `UNLocationNotificationTrigger` identifiers and `CLLocationManager`
+  monitored-region identifiers. It refuses to consume a twenty-first slot and
+  never removes an existing region or notification.
+- A retained Always service session is established while foregrounded, retained
+  while armed, recreated first during launch, and released only when disabled
+  or authorization becomes ineligible. The diagnostic does not create a
+  `CLBackgroundActivitySession`.
+- The existing `CLLocationManager` and `CLCircularRegion` continue to own entry
+  and exit monitoring. On entry, a default live-update stream and Core Motion
+  capture run against a persisted absolute 90-second deadline. Legacy
+  `startUpdatingLocation` is never run concurrently or used by this revision.
+- A finite UIKit background task protects setup and initial persistence. Its
+  expiration is recorded separately and does not end the live observation or
+  claim the app was suspended.
+- Every event is persisted immediately to a capped 512-event `UserDefaults`
+  record. Schema v3 explicitly migrates all schema-v2 events and their sequence
+  numbers under the existing key without clearing history. A
+  sample stores time, freshness, accuracy, speed, distance from the test store,
+  and execution duration. During the same observation the diagnostic records
+  `CMMotionActivity` classifications (automotive, stationary, walking,
+  running, unknown, plus cycling when reported), confidence, and the
+  activity start timestamp. Raw coordinates are used only in memory to
+  calculate distance and are neither persisted nor transmitted.
+- Motion permission is requested at arm time while the app is foregrounded.
+  Live activity updates are started only for the active observation. A
+  120-second historical query runs at observation start because live updates are
+  not assumed to arrive during a short background wake. Denied or
+  unavailable motion does not block GPS capture or production notifications.
 
 ### Test scenarios
 
-1. Drive past a store.
-2. Stop at a traffic light near the store.
-3. Park near the store.
-4. Walk past the store.
-5. Walk into the store.
-6. Stay inside for 5–10 minutes.
-7. Leave the store.
-8. Repeat with the app backgrounded.
-9. Repeat with the phone locked.
-10. Later, repeat after the app has been terminated.
-
-### Events to observe
-
-- Region entry and exit, including the monitored location and timestamp
-- Location updates and their timestamp, coordinates, accuracy, speed, and course
-- Motion activity changes such as automotive, walking, running, stationary, or unknown
-- Visit events exposed by iOS, including arrival and departure estimates
-- App lifecycle state relevant to each event
-- Permission and location-service state
-- Errors, delayed delivery, duplicate events, and missing events
+Use one legitimate Trader Joe's visit and preserve all earlier logs: arm while
+foregrounded outside the region, verify Always, Precise, Motion, Background App
+Refresh, the location background mode, service-session activity, and region
+registration, then background/lock the phone, enter, park, and walk into the
+store normally. Reopen only after the persisted 90-second deadline.
 
 ### Success criteria
 
-- Events are captured with enough timing and accuracy to compare drive-bys, nearby stops, walk-bys, and sustained visits.
-- Evidence continues to arrive reliably enough during backgrounded and locked-device tests.
-- Repeated tests show patterns that could support a simple, explainable visit heuristic.
-- The approach has acceptable battery impact for continued prototyping.
+- The programmable entry callback is durably recorded in relevant lifecycle
+  states.
+- Fresh samples provide enough accuracy, speed, and store-distance evidence to
+  compare the four scenarios.
+- Activity classifications, when present, are ordered on the same persisted
+  timeline and retain both `recordedAt` and `activityStartTimestamp`.
+- UIKit background-task expiration and observation termination are independent
+  events. A live location update or walking classification after expiration
+  but before the deadline is strong feasibility evidence.
+- The recorded end event has an explicit deadline, stream, disable, or
+  authorization reason. Ninety seconds is not described as guaranteed
+  background execution.
+- Process launch plus service-session and live-observation reconstruction is
+  direct reconstruction evidence, but does not identify why the previous
+  process ended. Callback gaps are inferred durations, never suspension proof.
+- Disabling the experiment stops live updates and motion, releases the service
+  session, ends any UIKit assertion, and removes only the diagnostic region.
 
-### Failure criteria
+### Known iOS constraints
 
-- Genuine visits and drive-bys are consistently indistinguishable.
-- Required events are frequently missing, excessively delayed, or unavailable in important lifecycle states.
-- Reliability depends on battery-intensive continuous high-accuracy tracking.
-- iOS restrictions prevent the intended experience without unacceptable user configuration or expectations.
+- This lifecycle proof of concept requires iOS 18, Always and Precise location,
+  a foreground-established Always service session, Motion authorization,
+  Background App Refresh, and the location background mode. Production
+  programmable notification delivery remains unchanged and continues to use
+  When In Use authorization.
+- Programmable terminated-app region delivery requires Always authorization; the
+  production notification trigger continues to require only When In Use.
+- UIKit background-task expiration is not app suspension and does not terminate
+  the live-update stream. `Task.sleep` is only an in-process cleanup
+  optimization; suspended cleanup can occur on a later wake or foreground
+  launch.
+- Region delivery uses iOS heuristics and may be delayed rather than occurring
+  exactly at the 100-meter boundary.
+- Background App Refresh must be available. Region relaunch does not occur
+  after a user force-quits the app, and after reboot it waits for the first
+  device unlock.
+- Default live updates have a temporary battery cost bounded to one active
+  observation. A stationary update does not terminate the stream because later
+  movement may resume it.
+- `CMMotionActivityManager` does not independently wake a suspended app.
+  Motion callbacks depend on Core Location running or waking the process.
+  Historical query results can still be empty, delayed, or low-confidence.
 
 ### Results
 
-No real-world tests have been run yet.
+The earlier GPS-only diagnostic completed initial real-world testing at The UPS
+Store #4398 and was disarmed. The next revision moved the target to Shell Food
+Mart and added Core Motion capture. The current target is Trader Joe's #119;
+existing Shell events remain preserved. This iOS 18 lifecycle revision replaces the
+legacy 45-second update burst but has not yet had a new driving test. The first
+single-visit validation is documented in
+`modules/there-you-go-location-notification/TESTING.md`.

@@ -213,6 +213,48 @@ public class ThereYouGoLocationNotificationModule: Module {
       let requests = await notificationCenter.pendingNotificationRequests()
       return !requests.contains(where: { $0.identifier == identifier })
     }
+
+    AsyncFunction("armArrivalDiagnosticAsync") {
+      () async throws -> ArrivalDiagnosticStatusRecord in
+      do {
+        return try await ThereYouGoArrivalDiagnostic.shared.arm()
+      } catch {
+        throw GenericException(error.localizedDescription)
+      }
+    }
+
+    AsyncFunction("getArrivalDiagnosticStatusAsync") {
+      () async -> ArrivalDiagnosticStatusRecord in
+      await ThereYouGoArrivalDiagnostic.shared.makeStatus()
+    }
+
+    AsyncFunction("getArrivalDiagnosticResultsAsync") {
+      () async -> ArrivalDiagnosticResultsRecord in
+      await ThereYouGoArrivalDiagnostic.shared.results()
+    }
+
+    AsyncFunction("clearArrivalDiagnosticResultsAsync") {
+      () async -> ArrivalDiagnosticResultsRecord in
+      await ThereYouGoArrivalDiagnostic.shared.clearResults()
+      return await ThereYouGoArrivalDiagnostic.shared.results()
+    }
+
+    AsyncFunction("disableArrivalDiagnosticAsync") {
+      () async -> ArrivalDiagnosticStatusRecord in
+      await ThereYouGoArrivalDiagnostic.shared.disable()
+    }
+
+    AsyncFunction("queryArrivalActivityHistoryAsync") {
+      (from: String, to: String) async throws -> ArrivalDiagnosticHistoryQueryRecord in
+      do {
+        return try await ThereYouGoArrivalDiagnostic.shared.queryActivityHistory(
+          from: from,
+          to: to
+        )
+      } catch {
+        throw GenericException(error.localizedDescription)
+      }
+    }
   }
 }
 

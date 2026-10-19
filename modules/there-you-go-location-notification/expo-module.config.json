@@ -1,6 +1,9 @@
 {
   "platforms": ["ios"],
   "apple": {
-    "modules": ["ThereYouGoLocationNotificationModule"]
+    "modules": ["ThereYouGoLocationNotificationModule"],
+    "appDelegateSubscribers": [
+      "ThereYouGoArrivalDiagnosticAppDelegateSubscriber"
+    ]
   }
 }
