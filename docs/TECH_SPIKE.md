@@ -174,10 +174,15 @@ existing `UNLocationNotificationTrigger`.
 - Exactly one `CLCircularRegion` is registered at `34.0203234,
   -118.4220680` (Trader Joe's #119, 3456 S Sepulveda Blvd, Los Angeles, CA
   90034; verified 2026-10-19 against the official store page and OpenStreetMap
-  node 276600064), with a 100-meter radius and identifier
+  node 276600064), with a 75-meter radius and identifier
   `tyg.diagnostic.arrival.v1.trader-joes-119` outside the production
-  `tyg.arrival.v1.` namespace. Arming or launch retires any older diagnostic
-  identifier, including Shell Food Mart, without clearing its persisted events.
+  `tyg.arrival.v1.` namespace. The 2026-10-19 visit used this identifier at
+  100 meters. Arming or launch requests the current radius for that same
+  identifier and retires any older diagnostic identifier, including Shell
+  Food Mart, without clearing its persisted events. `region-monitoring-started`
+  stores the requested radius and the radius read back from the monitored
+  region. A different read-back is recorded as
+  `diagnostic-region-radius-mismatch` and left in place.
 - Before arming, native code conservatively unions pending
   `UNLocationNotificationTrigger` identifiers and `CLLocationManager`
   monitored-region identifiers. It refuses to consume a twenty-first slot and
@@ -200,8 +205,14 @@ existing `UNLocationNotificationTrigger`.
   and execution duration. During the same observation the diagnostic records
   `CMMotionActivity` classifications (automotive, stationary, walking,
   running, unknown, plus cycling when reported), confidence, and the
-  activity start timestamp. Raw coordinates are used only in memory to
-  calculate distance and are neither persisted nor transmitted.
+  activity start timestamp. The first high-confidence walking sample whose
+  start is at or after observation entry appends one
+  `smart-arrival-would-notify` event. `recordedAt` is when the diagnostic had
+  that evidence; `activityStartTimestamp` remains when Core Motion says
+  walking began. Earlier automotive evidence in the same observation is
+  included when it was already recorded and is not required. The event does
+  not schedule or deliver a notification. Raw coordinates are used only in
+  memory to calculate distance and are neither persisted nor transmitted.
 - Motion permission is requested at arm time while the app is foregrounded.
   Live activity updates are started only for the active observation. A
   120-second historical query runs at observation start because live updates are
@@ -250,7 +261,7 @@ store normally. Reopen only after the persisted 90-second deadline.
   optimization; suspended cleanup can occur on a later wake or foreground
   launch.
 - Region delivery uses iOS heuristics and may be delayed rather than occurring
-  exactly at the 100-meter boundary.
+  exactly at the 75-meter boundary.
 - Background App Refresh must be available. Region relaunch does not occur
   after a user force-quits the app, and after reboot it waits for the first
   device unlock.
@@ -266,7 +277,12 @@ store normally. Reopen only after the persisted 90-second deadline.
 The earlier GPS-only diagnostic completed initial real-world testing at The UPS
 Store #4398 and was disarmed. The next revision moved the target to Shell Food
 Mart and added Core Motion capture. The current target is Trader Joe's #119;
-existing Shell events remain preserved. This iOS 18 lifecycle revision replaces the
-legacy 45-second update burst but has not yet had a new driving test. The first
-single-visit validation is documented in
+existing Shell events remain preserved. On 2026-10-19 the 100-meter diagnostic
+region entered at 3:05:32 PM. High-confidence automotive was seen immediately
+and ended about 35 seconds later. High-confidence walking was recorded at 52.6
+seconds, and fresh background location updates continued through the 90-second
+window. The production notification arrived while the user was still in the
+car. That history stays in the diagnostic record. The next run requests a
+75-meter region and records `smart-arrival-would-notify` without delivering a
+notification. The visit procedure is documented in
 `modules/there-you-go-location-notification/TESTING.md`.

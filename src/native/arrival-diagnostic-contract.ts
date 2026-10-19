@@ -14,8 +14,11 @@ export const ARRIVAL_DIAGNOSTIC_STORE_ADDRESS =
   '3456 S Sepulveda Blvd, Los Angeles, CA 90034';
 export const ARRIVAL_DIAGNOSTIC_LATITUDE = 34.0203234;
 export const ARRIVAL_DIAGNOSTIC_LONGITUDE = -118.422068;
-export const ARRIVAL_DIAGNOSTIC_RADIUS_METERS = 100;
+export const ARRIVAL_DIAGNOSTIC_RADIUS_METERS = 75;
+export const ARRIVAL_DIAGNOSTIC_RADIUS_TOLERANCE_METERS = 0.01;
 export const ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS = 90;
+export const ARRIVAL_DIAGNOSTIC_WOULD_NOTIFY_EVENT_TYPE =
+  'smart-arrival-would-notify';
 export const ARRIVAL_DIAGNOSTIC_MOTION_LOOKBACK_SECONDS = 120;
 export const ARRIVAL_DIAGNOSTIC_MAX_HISTORICAL_ACTIVITIES = 16;
 export const ARRIVAL_DIAGNOSTIC_HISTORY_QUERY_MAX_SECONDS = 30 * 60;
@@ -89,6 +92,88 @@ export function describeArrivalDiagnosticActivity(input: {
     labels,
     detail: `${input.source}:${labels.join(',') || 'none'}${cyclingSuffix}:${input.confidence}`,
   };
+}
+
+export function diagnosticMonitoredRadiusMatches(
+  monitoredRadiusMeters: number,
+  requestedRadiusMeters = ARRIVAL_DIAGNOSTIC_RADIUS_METERS,
+): boolean {
+  return (
+    Math.abs(monitoredRadiusMeters - requestedRadiusMeters) <
+    ARRIVAL_DIAGNOSTIC_RADIUS_TOLERANCE_METERS
+  );
+}
+
+export function shouldRecordSmartArrivalWouldNotify(input: {
+  observationStartedAtMilliseconds: number;
+  alreadyDecided: boolean;
+  source: ArrivalDiagnosticActivitySource;
+  walking: boolean;
+  automotive: boolean;
+  confidence: ArrivalDiagnosticActivityConfidence;
+  activityStartedAtMilliseconds: number;
+}): boolean {
+  return (
+    !input.alreadyDecided &&
+    (input.source === 'live' || input.source === 'historical-query') &&
+    input.walking &&
+    !input.automotive &&
+    input.confidence === 'high' &&
+    input.activityStartedAtMilliseconds >= input.observationStartedAtMilliseconds
+  );
+}
+
+export function smartArrivalDecisionElapsedSeconds(
+  observationStartedAtMilliseconds: number,
+  decisionAtMilliseconds: number,
+): number {
+  return Math.max(
+    0,
+    (decisionAtMilliseconds - observationStartedAtMilliseconds) / 1000,
+  );
+}
+
+export function selectPriorAutomotiveEvidence<
+  T extends {
+    automotive: boolean;
+    activityStartedAtMilliseconds: number;
+  },
+>(samples: readonly T[], walkingStartedAtMilliseconds: number): T | null {
+  let selected: T | null = null;
+  for (const sample of samples) {
+    if (
+      !sample.automotive ||
+      sample.activityStartedAtMilliseconds >= walkingStartedAtMilliseconds
+    ) {
+      continue;
+    }
+    if (
+      selected === null ||
+      sample.activityStartedAtMilliseconds >=
+        selected.activityStartedAtMilliseconds
+    ) {
+      selected = sample;
+    }
+  }
+  return selected;
+}
+
+export function describeSmartArrivalWouldNotify(input: {
+  radiusMeters?: number;
+  walkingStartedAt: string;
+  decisionAt: string;
+  elapsedSeconds: number;
+  priorAutomotive?: {
+    activityStartedAt: string;
+    confidence: ArrivalDiagnosticActivityConfidence;
+    source: ArrivalDiagnosticActivitySource;
+  } | null;
+}): string {
+  const radiusMeters = input.radiusMeters ?? ARRIVAL_DIAGNOSTIC_RADIUS_METERS;
+  const prior = input.priorAutomotive
+    ? `priorAutomotiveStart=${input.priorAutomotive.activityStartedAt};priorAutomotiveConfidence=${input.priorAutomotive.confidence};priorAutomotiveSource=${input.priorAutomotive.source}`
+    : 'priorAutomotive=none';
+  return `radiusMeters=${radiusMeters};walkingStartedAt=${input.walkingStartedAt};decisionAt=${input.decisionAt};elapsedSeconds=${input.elapsedSeconds.toFixed(3)};${prior}`;
 }
 
 const HISTORY_TIMESTAMP =

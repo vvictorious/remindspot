@@ -144,7 +144,8 @@ is disabled by default and is not part of notification reconciliation. It
 monitors only Trader Joe's store #119, West Los Angeles - Sepulveda, at
 3456 S Sepulveda Blvd, Los Angeles, CA 90034 (`34.0203234, -118.4220680`)
 with the identifier `tyg.diagnostic.arrival.v1.trader-joes-119` and a
-100-meter radius. On 2026-10-19 the official store page confirmed store 119
+75-meter radius. The 2026-10-19 visit used this same identifier at 100
+meters; those events stay in the record. On 2026-10-19 the official store page confirmed store 119
 and that address, and OpenStreetMap node 276600064 supplied the coordinate.
 That node is tagged Trader Joe's, `ref=119`, house number 3456, and links to
 the same official page. It never
@@ -164,14 +165,16 @@ distance from the test store, and elapsed observation time. An
 running, unknown, and cycling flags, confidence, the activity's own start
 timestamp, and a `detail` of
 `source:labels:confidence`. It does not persist the phone's coordinate and
-does not transmit results.
+does not transmit results. `results().radiusMeters` is the current 75-meter
+configuration, including when older events were recorded at 100 meters.
 
 On entry, the diagnostic starts a default `CLLocationUpdate.liveUpdates()`
 stream with an absolute 90-second UTC deadline under a retained foreground-
 established `CLServiceSession(.always)`. It never starts legacy
-`CLLocationManager.startUpdatingLocation`, never creates a
-`CLBackgroundActivitySession`, and does not classify arrival or suppress
-production notifications. Arming stops every
+`CLLocationManager.startUpdatingLocation` and never creates a
+`CLBackgroundActivitySession`. It records one diagnostic
+`smart-arrival-would-notify` event per observation and does not schedule,
+deliver, delay, or suppress production notifications. Arming stops every
 `tyg.diagnostic.arrival.v1.` region, including the former Shell Food Mart
 region `tyg.diagnostic.arrival.v1.shell-3801`, and then registers only the
 Trader Joe's region. A launch while disarmed also retires any non-current
@@ -187,7 +190,7 @@ Use a physical iPhone running iOS 18 or later. On an older OS, `arm()` returns
 an explicit unsupported-version error; it does not run the previous location
 burst.
 
-1. Start outside the 100-meter test region with ThereYouGo active in the
+1. Start outside the 75-meter test region with ThereYouGo active in the
    foreground. For a clean entry transition, begin
    at least 200 meters away and allow iOS several minutes to establish the
    outside state.
@@ -244,7 +247,12 @@ burst.
    - `observationDeadline: null`
    - `observationDurationSeconds: 90`
    - `diagnosticRegionRegistered: true` (allow a few seconds and call
-     `status()` again if monitoring has not started yet)
+     `status()` again if monitoring has not started yet). This is true only
+     when the monitored region identifier matches and its radius reads back
+     as 75 meters. `region-monitoring-started` records both the requested
+     radius and that read-back. A `diagnostic-region-radius-mismatch` event
+     means the monitored radius is still different; the diagnostic does not
+     stop or recreate the region after that reading.
    - `conservativeOccupiedRegionCount <= 20`
 
    Arming must occur while the app is active. This establishes the Always
@@ -309,7 +317,15 @@ The expected sequence is:
 7. optionally `uikit-background-task-expired`
 8. additional location or motion records after that UIKit event
 9. a walking classification if Core Location wakes or runs the app in time
-10. `observation-ended` with an explicit reason
+10. at most one `smart-arrival-would-notify` after a high-confidence walking
+    sample whose `activityStartTimestamp` is at or after observation start.
+    `recordedAt`, `decisionAt`, and `elapsedSeconds` are when that evidence
+    was available. `activityStartTimestamp` and `walkingStartedAt` are when
+    Core Motion says walking began. `priorAutomotive=none` is valid;
+    automotive fields are included only when an earlier sample in the same
+    observation was already recorded. This event does not schedule a
+    notification, and the observation continues until its deadline.
+11. `observation-ended` with an explicit reason
 
 Possible reasons include `deadline-timer-fired`,
 `deadline-detected-on-live-update`,
@@ -330,7 +346,7 @@ previous process ended.
 ### Lifecycle limitations and cleanup
 
 iOS applies region-entry heuristics; boundary callbacks can arrive minutes
-after a crossing and are not guaranteed at exactly 100 meters. The UIKit
+after a crossing and are not guaranteed at exactly 75 meters. The UIKit
 background task is a finite setup/persistence assertion, not a guarantee of
 runtime and not an app-suspension signal. There is no UIKit suspension
 callback. The 90-second value is an absolute observation deadline, not a

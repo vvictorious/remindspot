@@ -10,6 +10,7 @@ import {
   ARRIVAL_DIAGNOSTIC_MOTION_LOOKBACK_SECONDS,
   ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS,
   ARRIVAL_DIAGNOSTIC_RADIUS_METERS,
+  ARRIVAL_DIAGNOSTIC_WOULD_NOTIFY_EVENT_TYPE,
   ARRIVAL_DIAGNOSTIC_REGION_IDENTIFIER,
   ARRIVAL_DIAGNOSTIC_REGION_IDENTIFIER_PREFIX,
   ARRIVAL_DIAGNOSTIC_STORE_ADDRESS,
@@ -18,13 +19,18 @@ import {
   ArrivalDiagnosticHistoryWindowError,
   assessArrivalDiagnosticCapacity,
   describeArrivalDiagnosticActivity,
+  describeSmartArrivalWouldNotify,
   diagnosticContractIsIsolated,
+  diagnosticMonitoredRadiusMatches,
   hasArrivalDiagnosticDeadlineExpired,
   parseArrivalDiagnosticHistoryWindow,
+  selectPriorAutomotiveEvidence,
+  shouldRecordSmartArrivalWouldNotify,
+  smartArrivalDecisionElapsedSeconds,
 } from './arrival-diagnostic-contract';
 
 describe('arrival diagnostic contract', () => {
-  it("uses one distinct 100-meter Trader Joe's region and a 90-second observation", () => {
+  it("uses one distinct 75-meter Trader Joe's region and a 90-second observation", () => {
     expect(ARRIVAL_DIAGNOSTIC_REGION_IDENTIFIER).toBe(
       'tyg.diagnostic.arrival.v1.trader-joes-119',
     );
@@ -38,7 +44,13 @@ describe('arrival diagnostic contract', () => {
     );
     expect(ARRIVAL_DIAGNOSTIC_LATITUDE).toBe(34.0203234);
     expect(ARRIVAL_DIAGNOSTIC_LONGITUDE).toBe(-118.422068);
-    expect(ARRIVAL_DIAGNOSTIC_RADIUS_METERS).toBe(100);
+    expect(ARRIVAL_DIAGNOSTIC_RADIUS_METERS).toBe(75);
+    expect(ARRIVAL_DIAGNOSTIC_WOULD_NOTIFY_EVENT_TYPE).toBe(
+      'smart-arrival-would-notify',
+    );
+    expect(diagnosticMonitoredRadiusMatches(75)).toBe(true);
+    expect(diagnosticMonitoredRadiusMatches(75.009)).toBe(true);
+    expect(diagnosticMonitoredRadiusMatches(100)).toBe(false);
     expect(ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS).toBe(90);
     expect(diagnosticContractIsIsolated()).toBe(true);
   });
@@ -151,6 +163,155 @@ describe('arrival diagnostic contract', () => {
       occupiedAfterArm: 20,
       canArm: true,
     });
+  });
+});
+
+describe('smart arrival would-notify', () => {
+  const observationStartedAt = Date.parse('2026-10-19T22:05:32.000Z');
+  const walkingStartedAt = Date.parse('2026-10-19T22:06:24.600Z');
+  const decisionAt = Date.parse('2026-10-19T22:06:25.100Z');
+
+  it('qualifies the first high-confidence walk at or after entry without automotive history', () => {
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'live',
+        walking: true,
+        automotive: false,
+        confidence: 'high',
+        activityStartedAtMilliseconds: walkingStartedAt,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'historical-query',
+        walking: true,
+        automotive: false,
+        confidence: 'high',
+        activityStartedAtMilliseconds: observationStartedAt,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a walk that started before entry, a low-confidence sample, and a second decision', () => {
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'live',
+        walking: true,
+        automotive: false,
+        confidence: 'high',
+        activityStartedAtMilliseconds: observationStartedAt - 1,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'live',
+        walking: true,
+        automotive: true,
+        confidence: 'high',
+        activityStartedAtMilliseconds: walkingStartedAt,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'live',
+        walking: true,
+        automotive: false,
+        confidence: 'medium',
+        activityStartedAtMilliseconds: walkingStartedAt,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: false,
+        source: 'authorization-prompt',
+        walking: true,
+        automotive: false,
+        confidence: 'high',
+        activityStartedAtMilliseconds: walkingStartedAt,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRecordSmartArrivalWouldNotify({
+        observationStartedAtMilliseconds: observationStartedAt,
+        alreadyDecided: true,
+        source: 'live',
+        walking: true,
+        automotive: false,
+        confidence: 'high',
+        activityStartedAtMilliseconds: walkingStartedAt,
+      }),
+    ).toBe(false);
+  });
+
+  it('measures the decision from evidence time and keeps the walking start separate', () => {
+    expect(
+      smartArrivalDecisionElapsedSeconds(observationStartedAt, decisionAt),
+    ).toBeCloseTo(53.1, 3);
+    expect(
+      smartArrivalDecisionElapsedSeconds(observationStartedAt, walkingStartedAt),
+    ).toBeCloseTo(52.6, 3);
+
+    const prior = selectPriorAutomotiveEvidence(
+      [
+        {
+          source: 'historical-query' as const,
+          automotive: true,
+          confidence: 'high' as const,
+          activityStartedAtMilliseconds: observationStartedAt - 20_000,
+        },
+        {
+          source: 'live' as const,
+          automotive: true,
+          confidence: 'high' as const,
+          activityStartedAtMilliseconds: observationStartedAt + 1_000,
+        },
+        {
+          source: 'live' as const,
+          automotive: false,
+          confidence: 'high' as const,
+          activityStartedAtMilliseconds: walkingStartedAt,
+        },
+      ],
+      walkingStartedAt,
+    );
+
+    expect(prior?.activityStartedAtMilliseconds).toBe(observationStartedAt + 1_000);
+    expect(
+      describeSmartArrivalWouldNotify({
+        walkingStartedAt: '2026-10-19T22:06:24.600Z',
+        decisionAt: '2026-10-19T22:06:25.100Z',
+        elapsedSeconds: smartArrivalDecisionElapsedSeconds(
+          observationStartedAt,
+          decisionAt,
+        ),
+        priorAutomotive: {
+          activityStartedAt: '2026-10-19T22:05:33.000Z',
+          confidence: 'high',
+          source: 'live',
+        },
+      }),
+    ).toBe(
+      'radiusMeters=75;walkingStartedAt=2026-10-19T22:06:24.600Z;decisionAt=2026-10-19T22:06:25.100Z;elapsedSeconds=53.100;priorAutomotiveStart=2026-10-19T22:05:33.000Z;priorAutomotiveConfidence=high;priorAutomotiveSource=live',
+    );
+    expect(
+      describeSmartArrivalWouldNotify({
+        walkingStartedAt: '2026-10-19T22:06:24.600Z',
+        decisionAt: '2026-10-19T22:06:25.100Z',
+        elapsedSeconds: 53.1,
+        priorAutomotive: null,
+      }),
+    ).toContain('priorAutomotive=none');
   });
 });
 

@@ -23,7 +23,8 @@ private enum ArrivalDiagnosticConstants {
   static let storeName = "Trader Joe's"
   static let latitude = 34.0203234
   static let longitude = -118.4220680
-  static let radiusMeters = 100.0
+  static let radiusMeters = 75.0
+  static let radiusToleranceMeters = 0.01
   static let userDefaultsKey = "there-you-go.arrival-diagnostic.state.v1"
 }
 
@@ -216,7 +217,7 @@ private enum ArrivalDiagnosticError: LocalizedError {
     case .preciseLocationRequired:
       return "Precise Location must be enabled for useful arrival-distance diagnostics."
     case .radiusUnsupported:
-      return "The test device does not support the diagnostic's 100-meter region."
+      return "The test device does not support the diagnostic's 75-meter region."
     case .regionCapacity(let count):
       return "The diagnostic was not armed because \(count) of 20 conservative region slots are already occupied."
     case .invalidHistoryWindow(let message):
@@ -537,9 +538,9 @@ final class ThereYouGoArrivalDiagnostic:
     record.backgroundModeEnabled = backgroundModeEnabled
     record.regionMonitoringAvailable =
       CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self)
-    record.diagnosticRegionRegistered = monitoredRegions.contains {
-      $0.identifier == ArrivalDiagnosticConstants.regionIdentifier
-    }
+    record.diagnosticRegionRegistered = monitoredDiagnosticRegion(
+      in: monitoredRegions
+    ).map { isCurrentDiagnosticRadius($0.radius) } ?? false
     record.serviceSessionSupported = {
       if #available(iOS 18.0, *) {
         return true
@@ -576,10 +577,30 @@ final class ThereYouGoArrivalDiagnostic:
     guard
       !terminateIfDeadlineExpired(reason: "deadline-detected-on-lifecycle")
     else {
+      recordRadiusMismatchIfNeeded(
+        monitoredRadius: monitoredDiagnosticRegion(
+          in: manager.monitoredRegions
+        )?.radius,
+        source: "region-monitoring-started"
+      )
       return
     }
     recordCallbackOccurrence(source: "region-monitoring-started")
-    appendEvent(type: "region-monitoring-started", detail: nil)
+    let monitoredRadius = monitoredDiagnosticRegion(
+      in: manager.monitoredRegions
+    )?.radius
+    appendEvent(
+      type: "region-monitoring-started",
+      detail: regionRadiusDetail(
+        requestedRadius: (region as? CLCircularRegion)?.radius
+          ?? ArrivalDiagnosticConstants.radiusMeters,
+        monitoredRadius: monitoredRadius
+      )
+    )
+    recordRadiusMismatchIfNeeded(
+      monitoredRadius: monitoredRadius,
+      source: "region-monitoring-started"
+    )
   }
 
   func locationManager(
@@ -725,6 +746,12 @@ final class ThereYouGoArrivalDiagnostic:
         reconstructed: false
       )
     }
+    recordRadiusMismatchIfNeeded(
+      monitoredRadius: monitoredDiagnosticRegion(
+        in: locationManager?.monitoredRegions ?? []
+      )?.radius,
+      source: "did-become-active"
+    )
   }
 
   func handleWillTerminate() {
@@ -773,6 +800,55 @@ final class ThereYouGoArrivalDiagnostic:
     manager.distanceFilter = 5
     manager.pausesLocationUpdatesAutomatically = false
     locationManager = manager
+  }
+
+  private func monitoredDiagnosticRegion(
+    in regions: Set<CLRegion>
+  ) -> CLCircularRegion? {
+    regions.compactMap { $0 as? CLCircularRegion }.first {
+      $0.identifier == ArrivalDiagnosticConstants.regionIdentifier
+    }
+  }
+
+  private func isCurrentDiagnosticRadius(_ radius: Double) -> Bool {
+    abs(radius - ArrivalDiagnosticConstants.radiusMeters)
+      < ArrivalDiagnosticConstants.radiusToleranceMeters
+  }
+
+  private func radiusText(_ radius: Double) -> String {
+    if abs(radius.rounded() - radius) < 0.001 {
+      return String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), radius)
+    }
+    return String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), radius)
+  }
+
+  private func regionRadiusDetail(
+    requestedRadius: Double,
+    monitoredRadius: Double?
+  ) -> String {
+    let monitored = monitoredRadius.map(radiusText) ?? "unavailable"
+    return "requestedRadius=\(radiusText(requestedRadius));monitoredRadius=\(monitored)"
+  }
+
+  /// Records a wrong read-back and leaves the registered region in place.
+  private func recordRadiusMismatchIfNeeded(
+    monitoredRadius: Double?,
+    source: String
+  ) {
+    guard
+      let monitoredRadius,
+      !isCurrentDiagnosticRadius(monitoredRadius)
+    else {
+      return
+    }
+    let detail =
+      "requestedRadius=\(radiusText(ArrivalDiagnosticConstants.radiusMeters));monitoredRadius=\(radiusText(monitoredRadius));source=\(source)"
+    if state.events.contains(where: {
+      $0.type == "diagnostic-region-radius-mismatch" && $0.detail == detail
+    }) {
+      return
+    }
+    appendEvent(type: "diagnostic-region-radius-mismatch", detail: detail)
   }
 
   private func diagnosticRegion() -> CLCircularRegion {
@@ -1337,6 +1413,7 @@ final class ThereYouGoArrivalDiagnostic:
   private func appendEvent(
     type: String,
     detail: String?,
+    recordedAt: Date = Date(),
     locationTimestamp: String? = nil,
     horizontalAccuracyMeters: Double? = nil,
     speedMetersPerSecond: Double? = nil,
@@ -1360,7 +1437,7 @@ final class ThereYouGoArrivalDiagnostic:
       PersistedArrivalDiagnosticEvent(
         sequence: nextSequence,
         type: type,
-        recordedAt: timestamp(Date()),
+        recordedAt: timestamp(recordedAt),
         appState: applicationStateName(UIApplication.shared.applicationState),
         detail: detail,
         locationTimestamp: locationTimestamp,
@@ -1952,6 +2029,142 @@ final class ThereYouGoArrivalDiagnostic:
       activityConfidence: activityConfidenceName(activity.confidence),
       observationIdentifier: observationIdentifier
     )
+    maybeRecordSmartArrivalWouldNotify(
+      activity: activity,
+      source: source,
+      observationIdentifier: observationIdentifier
+    )
+  }
+
+  private func maybeRecordSmartArrivalWouldNotify(
+    activity: CMMotionActivity,
+    source: String,
+    observationIdentifier: String?
+  ) {
+    guard
+      let observationIdentifier,
+      state.activeObservationIdentifier == observationIdentifier,
+      source == "live" || source == "historical-query",
+      activity.walking,
+      !activity.automotive,
+      activity.confidence == .high,
+      let observationStartedValue = state.observationStartedAt,
+      let observationStartedAt = parseTimestamp(observationStartedValue),
+      activity.startDate >= observationStartedAt,
+      !hasSmartArrivalDecision(for: observationIdentifier)
+    else {
+      return
+    }
+
+    let decisionAt = Date()
+    let walkingStartedAt = timestamp(activity.startDate)
+    let elapsed = max(0, decisionAt.timeIntervalSince(observationStartedAt))
+    appendEvent(
+      type: "smart-arrival-would-notify",
+      detail: smartArrivalWouldNotifyDetail(
+        walkingStartedAt: walkingStartedAt,
+        decisionAt: timestamp(decisionAt),
+        elapsedSeconds: elapsed,
+        priorAutomotive: priorAutomotiveEvidence(
+          observationIdentifier: observationIdentifier,
+          before: activity.startDate
+        )
+      ),
+      recordedAt: decisionAt,
+      executionDurationSeconds: elapsed,
+      activityStartTimestamp: walkingStartedAt,
+      activityAutomotive: activity.automotive,
+      activityStationary: activity.stationary,
+      activityWalking: activity.walking,
+      activityRunning: activity.running,
+      activityUnknown: activity.unknown,
+      activityCycling: activity.cycling,
+      activityConfidence: activityConfidenceName(activity.confidence),
+      observationIdentifier: observationIdentifier
+    )
+  }
+
+  private func hasSmartArrivalDecision(for observationIdentifier: String) -> Bool {
+    state.events.contains {
+      $0.type == "smart-arrival-would-notify"
+        && $0.observationIdentifier == observationIdentifier
+    }
+  }
+
+  private struct PriorAutomotiveEvidence {
+    let activityStartedAt: String
+    let confidence: String
+    let source: String
+  }
+
+  private func priorAutomotiveEvidence(
+    observationIdentifier: String,
+    before walkingStart: Date
+  ) -> PriorAutomotiveEvidence? {
+    var selected: (start: Date, evidence: PriorAutomotiveEvidence)?
+    for event in state.events {
+      guard
+        event.observationIdentifier == observationIdentifier,
+        event.type == "activity-classification",
+        event.activityAutomotive == true,
+        let startValue = event.activityStartTimestamp,
+        let start = parseTimestamp(startValue),
+        start < walkingStart,
+        let confidence = event.activityConfidence,
+        let source = activityDetailSource(event.detail)
+      else {
+        continue
+      }
+      if let selected, start <= selected.start {
+        continue
+      }
+      selected = (
+        start,
+        PriorAutomotiveEvidence(
+          activityStartedAt: startValue,
+          confidence: confidence,
+          source: source
+        )
+      )
+    }
+    return selected?.evidence
+  }
+
+  private func activityDetailSource(_ detail: String?) -> String? {
+    guard
+      let detail,
+      let separator = detail.firstIndex(of: ":")
+    else {
+      return nil
+    }
+    switch String(detail[..<separator]) {
+    case "live", "historical-query", "authorization-prompt":
+      return String(detail[..<separator])
+    default:
+      return nil
+    }
+  }
+
+  private func smartArrivalWouldNotifyDetail(
+    walkingStartedAt: String,
+    decisionAt: String,
+    elapsedSeconds: Double,
+    priorAutomotive: PriorAutomotiveEvidence?
+  ) -> String {
+    let elapsed = String(
+      format: "%.3f",
+      locale: Locale(identifier: "en_US_POSIX"),
+      elapsedSeconds
+    )
+    var detail =
+      "radiusMeters=\(radiusText(ArrivalDiagnosticConstants.radiusMeters));walkingStartedAt=\(walkingStartedAt);decisionAt=\(decisionAt);elapsedSeconds=\(elapsed)"
+    if let priorAutomotive {
+      detail +=
+        ";priorAutomotiveStart=\(priorAutomotive.activityStartedAt);priorAutomotiveConfidence=\(priorAutomotive.confidence);priorAutomotiveSource=\(priorAutomotive.source)"
+    } else {
+      detail += ";priorAutomotive=none"
+    }
+    return detail
   }
 
   private func activityKey(_ activity: CMMotionActivity) -> String {
