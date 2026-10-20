@@ -509,7 +509,7 @@ describe('native geofence contract', () => {
           itemReferences: desired.itemReferences,
         },
       }),
-    ).toBe('consumed-same-fingerprint');
+    ).toBe('add');
     expect(
       classifyNativeRequestTransition({
         desired,

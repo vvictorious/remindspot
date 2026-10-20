@@ -34,6 +34,8 @@ export type GeofenceSchedulingStatus =
       selectedPlaceCount: number;
       pendingRequestCount: number;
       isDegraded: boolean;
+      observationEligible: boolean;
+      missingObservationRequirements: string[];
     }
   | { status: 'error'; error: Error };
 
@@ -109,6 +111,8 @@ function pendingStoreLogDetails(
 
   return {
     isDegraded: state.isDegraded,
+    observationEligible: state.observationEligible,
+    missingObservationRequirements: state.missingObservationRequirements,
     stores: state.requests
       .filter((request) => request.status === 'pending' && request.isPending)
       .map((request) => {
@@ -250,6 +254,8 @@ export class GeofenceSchedulingCoordinator {
       selectedPlaceCount: state.selectedPlaceIds.length,
       pendingRequestCount: state.pendingManagedRequestIds.length,
       isDegraded: state.isDegraded,
+      observationEligible: state.observationEligible,
+      missingObservationRequirements: state.missingObservationRequirements,
     });
   }
 
@@ -360,6 +366,9 @@ export class GeofenceSchedulingCoordinator {
       retainedFallbackPlaceIds: result.retainedFallbackPlaceIds,
       failures: result.failures,
       isDegraded: result.state.isDegraded,
+      observationEligible: result.state.observationEligible,
+      missingObservationRequirements:
+        result.state.missingObservationRequirements,
     });
   }
 
@@ -380,6 +389,8 @@ export class GeofenceSchedulingCoordinator {
       selectedPlaceCount: state.selectedPlaceIds.length,
       pendingRequestCount: state.pendingManagedRequestIds.length,
       isDegraded: state.isDegraded,
+      observationEligible: state.observationEligible,
+      missingObservationRequirements: state.missingObservationRequirements,
     });
     this.log?.('info', 'pending stores', pendingStoreLogDetails(state));
   }

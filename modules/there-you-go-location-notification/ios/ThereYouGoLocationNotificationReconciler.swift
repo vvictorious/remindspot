@@ -3,9 +3,10 @@ import CryptoKit
 import Foundation
 import UserNotifications
 
-// Runtime owner of snapshot validation, item-aware selection, persistence, and
-// UNUserNotificationCenter reconciliation. This repository has no XCTest target
-// for local Expo modules; see TESTING.md for the manual device procedure.
+// Runtime owner of snapshot validation, item-aware selection, persistence,
+// programmable CLCircularRegion registration, qualified-arrival delivery, and
+// observation recovery. This repository has no XCTest target for local Expo
+// modules; see TESTING.md.
 
 enum GeofenceNotificationConstants {
   static let stateSchemaVersion = 2
@@ -197,6 +198,8 @@ struct NativeGeofenceStateView: Sendable {
   let selectedPlaceIds: [String]
   let pendingManagedRequestIds: [String]
   let isDegraded: Bool
+  let observationEligible: Bool
+  let missingObservationRequirements: [String]
 }
 
 struct NativeSyncReport: Sendable {
@@ -207,6 +210,23 @@ struct NativeSyncReport: Sendable {
   let retainedFallbackPlaceIds: [String]
   let failures: [NativeReconciliationFailure]
   let state: NativeGeofenceStateView
+}
+
+struct SmartArrivalObservationRuntimeSnapshot: Sendable {
+  let observationCount: Int
+  let nextDeadline: Date?
+  let shouldRetainServiceSession: Bool
+}
+
+enum DeliverySubmitError: LocalizedError {
+  case staleIntent
+
+  var errorDescription: String? {
+    switch self {
+    case .staleIntent:
+      return "The delivery intent no longer matches its registration."
+    }
+  }
 }
 
 enum CandidateSnapshotValidationError: LocalizedError {
@@ -445,6 +465,8 @@ enum CandidateSnapshotValidator {
 }
 
 actor ThereYouGoLocationNotificationReconciler {
+  static let shared = ThereYouGoLocationNotificationReconciler()
+
   private let notificationCenter = UNUserNotificationCenter.current()
   private let encoder: JSONEncoder
   private let decoder = JSONDecoder()
@@ -458,9 +480,18 @@ actor ThereYouGoLocationNotificationReconciler {
   }
 
   func sync(snapshot: PersistedCandidateSnapshot) async throws -> NativeSyncReport {
+    await ThereYouGoSmartArrivalRuntime.shared.requestForegroundPermissionsIfNeeded()
     await acquireOperation()
-    defer { releaseOperation() }
-    return try await performSync(snapshot: snapshot)
+    let report: NativeSyncReport
+    do {
+      report = try await performSync(snapshot: snapshot)
+    } catch {
+      releaseOperation()
+      throw error
+    }
+    releaseOperation()
+    await ThereYouGoSmartArrivalRuntime.shared.syncToPersistedObservations()
+    return report
   }
 
   private func performSync(
@@ -486,25 +517,22 @@ actor ThereYouGoLocationNotificationReconciler {
     })
     try validateSnapshotFreshness(snapshot, previous: state.snapshot)
 
+    await cancelLeftoverManagedLocationTriggers()
+    let deliveryFailures = try await reconcileArrivalDelivery(state: &state)
+    failures.append(contentsOf: deliveryFailures)
+    try await cancelInstalledConsumedRegions(state: &state)
     var pendingRequests = await notificationCenter.pendingNotificationRequests()
+    var installedRegions = await monitoredManagedRegions()
     var entries = try manifestByPlaceId(state.requests)
 
     for placeId in entries.keys.sorted() {
-      guard var entry = entries[placeId] else {
+      guard let entry = entries[placeId] else {
         continue
       }
-      let isPending = pendingRequests.contains(where: {
+      let isPending = installedRegions.contains(where: {
         $0.identifier == entry.installationId
       })
-      let hasCancellationIntent = state.pendingCancellations.contains(where: {
-        $0.installationId == entry.installationId
-      })
-      if entry.status == .pending && !isPending && !hasCancellationIntent {
-        // One-shot delivery, user-cleared delivery, and OS removal are
-        // indistinguishable. Keep a same-fingerprint tombstone and do not rearm.
-        entry.status = .consumed
-        entries[placeId] = entry
-      } else if entry.status == .consumed && isPending {
+      if entry.status == .consumed && isPending {
         let intent = PersistedCancellationIntent(
           placeId: placeId,
           installationId: entry.installationId
@@ -529,12 +557,13 @@ actor ThereYouGoLocationNotificationReconciler {
     }
     state.requests = sortedManifest(entries)
     try saveState(&state)
+    installedRegions = await monitoredManagedRegions()
 
     let knownInstallationIds = Set(
       entries.values.map(\.installationId) +
         state.pendingCancellations.map(\.installationId)
     )
-    let orphanIds = pendingRequests
+    let orphanIds = installedRegions
       .map(\.identifier)
       .filter {
         isManagedIdentifier($0) && !knownInstallationIds.contains($0)
@@ -562,6 +591,7 @@ actor ThereYouGoLocationNotificationReconciler {
     }
 
     pendingRequests = await notificationCenter.pendingNotificationRequests()
+    installedRegions = await monitoredManagedRegions()
     let desiredPool = try desiredNotifications(from: snapshot)
     let desiredByPlaceId = Dictionary(
       uniqueKeysWithValues: desiredPool.map { ($0.placeId, $0) }
@@ -596,7 +626,7 @@ actor ThereYouGoLocationNotificationReconciler {
       guard
         let entry = entries[placeId],
         entry.status == .pending,
-        pendingRequests.contains(where: { $0.identifier == entry.installationId })
+        installedRegions.contains(where: { $0.identifier == entry.installationId })
       else {
         continue
       }
@@ -638,6 +668,48 @@ actor ThereYouGoLocationNotificationReconciler {
     state.requests = sortedManifest(entries)
     try saveState(&state)
     pendingRequests = await notificationCenter.pendingNotificationRequests()
+    installedRegions = await monitoredManagedRegions()
+    let eligibility =
+      await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+    if !eligibility.canRegisterRegions {
+      failures.append(
+        NativeReconciliationFailure(
+          placeId: "",
+          code: "runtime-ineligible",
+          message: "Smart Arrival requires iOS 18 or later and circular region monitoring."
+        )
+      )
+    }
+    let permissionGaps = eligibility.missingRequirements.filter {
+      [
+        "always-location",
+        "precise-location",
+        "motion",
+        "notifications"
+      ].contains($0)
+    }
+    if eligibility.canRegisterRegions, !permissionGaps.isEmpty, !selected.isEmpty {
+      failures.append(
+        NativeReconciliationFailure(
+          placeId: "",
+          code: "permission-ineligible",
+          message:
+            "Smart Arrival observation needs \(permissionGaps.joined(separator: ", "))."
+        )
+      )
+    }
+    if
+      let message = await ThereYouGoSmartArrivalRuntime.shared
+        .takeMonitoringFailure(identifier: "*")
+    {
+      failures.append(
+        NativeReconciliationFailure(
+          placeId: "",
+          code: "region-monitoring-failed",
+          message: message
+        )
+      )
+    }
 
     for desired in selected {
       if blockedPlaceIds.contains(desired.placeId) {
@@ -645,8 +717,8 @@ actor ThereYouGoLocationNotificationReconciler {
       }
 
       let oldEntry = entries[desired.placeId]
-      let oldPendingRequest = oldEntry.flatMap { entry in
-        pendingRequests.first(where: { $0.identifier == entry.installationId })
+      let oldInstalledRegion = oldEntry.flatMap { entry in
+        installedRegions.first(where: { $0.identifier == entry.installationId })
       }
 
       if let entry = oldEntry,
@@ -659,22 +731,51 @@ actor ThereYouGoLocationNotificationReconciler {
       if let entry = oldEntry,
         entry.status == .pending,
         entry.fingerprint == desired.fingerprint,
-        let request = oldPendingRequest,
-        verify(request: request, matches: desired) {
+        let region = oldInstalledRegion,
+        verify(region: region, matches: desired) {
+        await ThereYouGoSmartArrivalRuntime.shared.clearMonitoringFailure(
+          identifier: entry.installationId
+        )
         unchangedPlaceIds.append(desired.placeId)
         continue
       }
 
-      var locationTriggerCount = pendingRequests.filter {
-        $0.trigger is UNLocationNotificationTrigger
-      }.count
       if
-        locationTriggerCount >= GeofenceNotificationConstants.maximumLocationTriggers,
+        oldInstalledRegion == nil,
+        let installationId = oldEntry?.installationId,
+        let message = await ThereYouGoSmartArrivalRuntime.shared
+          .takeMonitoringFailure(identifier: installationId)
+      {
+        failures.append(
+          NativeReconciliationFailure(
+            placeId: desired.placeId,
+            code: "region-monitoring-failed",
+            message: message
+          )
+        )
+      }
+
+      guard eligibility.canRegisterRegions else {
+        continue
+      }
+
+      let reusableInstallationId =
+        oldEntry?.status == .pending && oldEntry?.fingerprint == desired.fingerprint
+          ? oldEntry?.installationId
+          : nil
+      var occupiedIdentifiers = await occupiedRegionIdentifiers(
+        pendingRequests: pendingRequests
+      )
+      if
+        !canRegisterRegion(
+          occupiedIdentifiers: occupiedIdentifiers,
+          reusableIdentifier: reusableInstallationId
+        ),
         let retirement = retirementCandidate(
           entries: entries,
           selectedPlaceIds: selectedPlaceIds,
           desiredByPlaceId: desiredByPlaceId,
-          pendingRequests: pendingRequests
+          installedRegions: installedRegions
         )
       {
         entries.removeValue(forKey: retirement.placeId)
@@ -701,12 +802,18 @@ actor ThereYouGoLocationNotificationReconciler {
           )
         }
         pendingRequests = await notificationCenter.pendingNotificationRequests()
-        locationTriggerCount = pendingRequests.filter {
-          $0.trigger is UNLocationNotificationTrigger
-        }.count
+        installedRegions = await monitoredManagedRegions()
+        occupiedIdentifiers = await occupiedRegionIdentifiers(
+          pendingRequests: pendingRequests
+        )
       }
 
-      guard locationTriggerCount < GeofenceNotificationConstants.maximumLocationTriggers else {
+      guard
+        canRegisterRegion(
+          occupiedIdentifiers: occupiedIdentifiers,
+          reusableIdentifier: reusableInstallationId
+        )
+      else {
         failures.append(
           NativeReconciliationFailure(
             placeId: desired.placeId,
@@ -714,40 +821,20 @@ actor ThereYouGoLocationNotificationReconciler {
             message: "No region-monitoring capacity is available for a verified replacement."
           )
         )
-        if oldPendingRequest != nil {
+        if oldInstalledRegion != nil {
           retainedFallbackPlaceIds.append(desired.placeId)
         }
         continue
       }
 
-      let installationId = makeInstallationId(placeId: desired.placeId)
-      let request = makeNotificationRequest(
-        installationId: installationId,
-        desired: desired
+      let installationId = reusableInstallationId ?? makeInstallationId(
+        placeId: desired.placeId
       )
-
-      do {
-        try await notificationCenter.add(request)
-      } catch {
-        failures.append(
-          NativeReconciliationFailure(
-            placeId: desired.placeId,
-            code: "schedule-failed",
-            message: error.localizedDescription
-          )
-        )
-        if oldPendingRequest != nil {
-          retainedFallbackPlaceIds.append(desired.placeId)
-        }
-        continue
-      }
-
-      let requestsAfterAdd = await notificationCenter.pendingNotificationRequests()
+      let verifiedRegion = await ThereYouGoSmartArrivalRuntime.shared
+        .startMonitoring(desired: desired, installationId: installationId)
       guard
-        let verifiedRequest = requestsAfterAdd.first(where: {
-          $0.identifier == installationId
-        }),
-        verify(request: verifiedRequest, matches: desired)
+        let verifiedRegion,
+        verify(region: verifiedRegion, matches: desired)
       else {
         let intent = PersistedCancellationIntent(
           placeId: desired.placeId,
@@ -763,14 +850,19 @@ actor ThereYouGoLocationNotificationReconciler {
         failures.append(
           NativeReconciliationFailure(
             placeId: desired.placeId,
-            code: "verification-failed",
-            message: "The newly scheduled request did not match its desired configuration."
+            code: verifiedRegion == nil
+              ? "schedule-failed"
+              : "verification-failed",
+            message: verifiedRegion == nil
+              ? "The production region could not be registered."
+              : "The newly registered region did not match its desired configuration."
           )
         )
-        if oldPendingRequest != nil {
+        if oldInstalledRegion != nil {
           retainedFallbackPlaceIds.append(desired.placeId)
         }
         pendingRequests = await notificationCenter.pendingNotificationRequests()
+        installedRegions = await monitoredManagedRegions()
         continue
       }
 
@@ -811,14 +903,16 @@ actor ThereYouGoLocationNotificationReconciler {
       }
 
       pendingRequests = await notificationCenter.pendingNotificationRequests()
+      installedRegions = await monitoredManagedRegions()
     }
 
     pendingRequests = await notificationCenter.pendingNotificationRequests()
+    installedRegions = await monitoredManagedRegions()
     let missingSelectedCount = selected.filter {
       !isSatisfied(
         desired: $0,
         entry: entries[$0.placeId],
-        pendingRequests: pendingRequests
+        installedRegions: installedRegions
       )
     }.count
     let samePlaceFallbackCount = selected.filter {
@@ -829,7 +923,7 @@ actor ThereYouGoLocationNotificationReconciler {
       else {
         return false
       }
-      return pendingRequests.contains(where: {
+      return installedRegions.contains(where: {
         $0.identifier == entry.installationId
       })
     }.count
@@ -838,7 +932,7 @@ actor ThereYouGoLocationNotificationReconciler {
       .filter { entry in
         entry.status == .pending &&
           !selectedPlaceIds.contains(entry.placeId) &&
-          pendingRequests.contains(where: {
+          installedRegions.contains(where: {
             $0.identifier == entry.installationId
           })
       }
@@ -889,9 +983,11 @@ actor ThereYouGoLocationNotificationReconciler {
     state.requests = sortedManifest(entries)
     try saveState(&state)
     let finalPendingRequests = await notificationCenter.pendingNotificationRequests()
-    let stateView = makeStateView(
+    let finalInstalledRegions = await monitoredManagedRegions()
+    let stateView = await makeStateView(
       state: state,
-      pendingRequests: finalPendingRequests
+      pendingRequests: finalPendingRequests,
+      installedRegions: finalInstalledRegions
     )
 
     return NativeSyncReport(
@@ -906,31 +1002,198 @@ actor ThereYouGoLocationNotificationReconciler {
   }
 
   func getState() async throws -> NativeGeofenceStateView {
+    await ThereYouGoSmartArrivalRuntime.shared.requestForegroundPermissionsIfNeeded()
+    await acquireOperation()
+    let view: NativeGeofenceStateView
+    do {
+      view = try await performGetState()
+    } catch {
+      releaseOperation()
+      throw error
+    }
+    releaseOperation()
+    await ThereYouGoSmartArrivalRuntime.shared.syncToPersistedObservations()
+    return view
+  }
+
+  func recoverPersistedArrivals() async {
     await acquireOperation()
     defer { releaseOperation() }
-    return try await performGetState()
+    do {
+      var state = try loadState()
+      _ = try await reconcileArrivalDelivery(state: &state)
+      try await cancelInstalledConsumedRegions(state: &state)
+    } catch {
+      return
+    }
+  }
+
+  func recoverOnLaunch(launchedForLocation: Bool) async {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      var state = try loadState()
+      _ = try await recoverPendingCancellations(state: &state)
+      await cancelLeftoverManagedLocationTriggers()
+      _ = try await reconcileArrivalDelivery(state: &state)
+      try await cancelInstalledConsumedRegions(state: &state)
+      await restoreMissingRegions(state: state)
+    } catch {
+      return
+    }
+    _ = launchedForLocation
+  }
+
+  func regionEntered(installationId: String, at enteredAt: Date) async {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      var state = try loadState()
+      guard
+        let request = state.requests.first(where: {
+          $0.installationId == installationId && $0.status == .pending
+        })
+      else {
+        return
+      }
+      state = SmartArrivalStateTransitions.regionEntered(
+        placeId: request.placeId,
+        registrationId: installationId,
+        observationIdentifier: UUID().uuidString.lowercased(),
+        at: enteredAt,
+        in: state
+      )
+      let eligibility =
+        await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+      state = SmartArrivalStateTransitions.endObservationsIfIneligible(
+        state,
+        observationEligible: eligibility.canObserve
+      )
+      try saveState(&state)
+    } catch {
+      return
+    }
+  }
+
+  func applyLocation(_ evidence: SmartArrivalLocationEvidence) async {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      var state = try loadState()
+      state = SmartArrivalStateTransitions.locationObserved(evidence, in: state)
+      try saveState(&state)
+      _ = try await reconcileArrivalDelivery(state: &state)
+      try await cancelInstalledConsumedRegions(state: &state)
+    } catch {
+      return
+    }
+  }
+
+  func applyMotion(
+    _ evidence: SmartArrivalMotionEvidence,
+    latestLocation: SmartArrivalLocationEvidence?
+  ) async {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      var state = try loadState()
+      state = SmartArrivalStateTransitions.motionObserved(
+        evidence,
+        latestLocation: latestLocation,
+        in: state
+      )
+      try saveState(&state)
+      _ = try await reconcileArrivalDelivery(state: &state)
+      try await cancelInstalledConsumedRegions(state: &state)
+    } catch {
+      return
+    }
+  }
+
+  func observationRuntimeSnapshot(
+    at now: Date
+  ) async -> SmartArrivalObservationRuntimeSnapshot {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      var state = try loadState()
+      let eligibility =
+        await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+      var recovered = SmartArrivalStateTransitions.recover(state, at: now)
+      recovered = SmartArrivalStateTransitions.endObservationsIfIneligible(
+        recovered,
+        observationEligible: eligibility.canObserve
+      )
+      if
+        recovered.observations != state.observations ||
+        recovered.deliveryIntents != state.deliveryIntents
+      {
+        state = recovered
+        try saveState(&state)
+      }
+      let nextDeadline = state.observations
+        .compactMap { CandidateSnapshotValidator.iso8601Date($0.deadline) }
+        .filter { $0 > now }
+        .min()
+      let pendingMonitoredCount = state.requests.filter {
+        $0.status == .pending
+      }.count
+      return SmartArrivalObservationRuntimeSnapshot(
+        observationCount: state.observations.count,
+        nextDeadline: nextDeadline,
+        shouldRetainServiceSession:
+          pendingMonitoredCount > 0 || !state.observations.isEmpty
+      )
+    } catch {
+      return SmartArrivalObservationRuntimeSnapshot(
+        observationCount: 0,
+        nextDeadline: nil,
+        shouldRetainServiceSession: false
+      )
+    }
+  }
+
+  func desiredNotificationContent(
+    forInstallationId installationId: String
+  ) async -> DesiredStoreNotification? {
+    await acquireOperation()
+    defer { releaseOperation() }
+    do {
+      let state = try loadState()
+      guard
+        let snapshot = state.snapshot,
+        let entry = state.requests.first(where: {
+          $0.installationId == installationId
+        })
+      else {
+        return nil
+      }
+      return try desiredNotifications(from: snapshot).first {
+        $0.placeId == entry.placeId
+      }
+    } catch {
+      return nil
+    }
   }
 
   private func performGetState() async throws -> NativeGeofenceStateView {
     var state = try loadState()
     _ = try await recoverPendingCancellations(state: &state)
+    await cancelLeftoverManagedLocationTriggers()
+    _ = try await reconcileArrivalDelivery(state: &state)
+    try await cancelInstalledConsumedRegions(state: &state)
     var entries = try manifestByPlaceId(state.requests)
     var pendingRequests = await notificationCenter.pendingNotificationRequests()
+    var installedRegions = await monitoredManagedRegions()
 
     for placeId in entries.keys.sorted() {
-      guard var entry = entries[placeId] else {
+      guard let entry = entries[placeId] else {
         continue
       }
-      let isPending = pendingRequests.contains(where: {
+      let isPending = installedRegions.contains(where: {
         $0.identifier == entry.installationId
       })
-      let hasCancellationIntent = state.pendingCancellations.contains(where: {
-        $0.installationId == entry.installationId
-      })
-      if entry.status == .pending && !isPending && !hasCancellationIntent {
-        entry.status = .consumed
-        entries[placeId] = entry
-      } else if entry.status == .consumed && isPending {
+      if entry.status == .consumed && isPending {
         let intent = PersistedCancellationIntent(
           placeId: placeId,
           installationId: entry.installationId
@@ -948,12 +1211,13 @@ actor ThereYouGoLocationNotificationReconciler {
 
     state.requests = sortedManifest(entries)
     try saveState(&state)
+    installedRegions = await monitoredManagedRegions()
 
     let knownInstallationIds = Set(
       entries.values.map(\.installationId) +
         state.pendingCancellations.map(\.installationId)
     )
-    let orphanIds = pendingRequests
+    let orphanIds = installedRegions
       .map(\.identifier)
       .filter {
         isManagedIdentifier($0) && !knownInstallationIds.contains($0)
@@ -973,8 +1237,13 @@ actor ThereYouGoLocationNotificationReconciler {
     }
 
     pendingRequests = await notificationCenter.pendingNotificationRequests()
+    installedRegions = await monitoredManagedRegions()
     state.requests = sortedManifest(entries)
-    return makeStateView(state: state, pendingRequests: pendingRequests)
+    return await makeStateView(
+      state: state,
+      pendingRequests: pendingRequests,
+      installedRegions: installedRegions
+    )
   }
 
   private func acquireOperation() async {
@@ -1257,21 +1526,195 @@ actor ThereYouGoLocationNotificationReconciler {
     }.joined()
   }
 
-  private func makeNotificationRequest(
-    installationId: String,
+  private func reconcileArrivalDelivery(
+    state: inout PersistedGeofenceState
+  ) async throws -> [NativeReconciliationFailure] {
+    var failures: [NativeReconciliationFailure] = []
+    let eligibility =
+      await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+    let ended = SmartArrivalStateTransitions.endObservationsIfIneligible(
+      state,
+      observationEligible: eligibility.canObserve
+    )
+    if ended.observations != state.observations {
+      state = ended
+      try saveState(&state)
+    }
+
+    let pendingRequests = await notificationCenter.pendingNotificationRequests()
+    let deliveredNotifications =
+      await notificationCenter.deliveredNotifications()
+    let previousNotificationIds = state.deliveryIntents.map(\.notificationId)
+    let recovery = SmartArrivalStateTransitions.recoverDeliveries(
+      state,
+      at: Date(),
+      pendingNotificationIds: Set(pendingRequests.map(\.identifier)),
+      deliveredNotificationIds: Set(
+        deliveredNotifications.map(\.request.identifier)
+      )
+    )
+    if
+      recovery.state.requests != state.requests ||
+      recovery.state.observations != state.observations ||
+      recovery.state.deliveryIntents != state.deliveryIntents
+    {
+      state = recovery.state
+      try saveState(&state)
+    }
+    let retainedNotificationIds = Set(
+      state.deliveryIntents.map(\.notificationId) +
+        recovery.consumedNotificationIds
+    )
+    removeStalePendingDeliveryNotifications(
+      previousIds: previousNotificationIds,
+      retainedIds: Array(retainedNotificationIds)
+    )
+
+    let notificationsAuthorized = !eligibility.missingRequirements.contains(
+      "notifications"
+    )
+    for intent in recovery.intentsToSubmit {
+      guard notificationsAuthorized else {
+        failures.append(
+          NativeReconciliationFailure(
+            placeId: intent.placeId,
+            code: "notification-unauthorized",
+            message:
+              "A qualified arrival is waiting because notification permission is not granted."
+          )
+        )
+        continue
+      }
+
+      do {
+        try await submitDeliveryIntent(intent, state: state)
+        state = SmartArrivalStateTransitions.stateAfterSubmission(
+          state,
+          notificationId: intent.notificationId,
+          succeeded: true
+        )
+        try saveState(&state)
+      } catch DeliverySubmitError.staleIntent {
+        try saveState(&state)
+      } catch {
+        failures.append(
+          NativeReconciliationFailure(
+            placeId: intent.placeId,
+            code: "delivery-submit-failed",
+            message: "The qualified arrival notification could not be submitted."
+          )
+        )
+      }
+    }
+    return failures
+  }
+
+  private func submitDeliveryIntent(
+    _ intent: PersistedSmartArrivalDeliveryIntent,
+    state: PersistedGeofenceState
+  ) async throws {
+    guard
+      let snapshot = state.snapshot,
+      let desired = try desiredNotifications(from: snapshot).first(where: {
+        $0.placeId == intent.placeId && $0.fingerprint == intent.fingerprint
+      }),
+      state.requests.contains(where: {
+        $0.placeId == intent.placeId &&
+          $0.installationId == intent.registrationId &&
+          $0.fingerprint == intent.fingerprint &&
+          $0.status == .pending
+      })
+    else {
+      throw DeliverySubmitError.staleIntent
+    }
+
+    try await notificationCenter.add(
+      makeDeliveryNotificationRequest(intent: intent, desired: desired)
+    )
+  }
+
+  private func cancelInstalledConsumedRegions(
+    state: inout PersistedGeofenceState
+  ) async throws {
+    let entries = try manifestByPlaceId(state.requests)
+    let installedRegions = await monitoredManagedRegions()
+    for placeId in entries.keys.sorted() {
+      guard
+        let entry = entries[placeId],
+        entry.status == .consumed,
+        installedRegions.contains(where: {
+          $0.identifier == entry.installationId
+        })
+      else {
+        continue
+      }
+      let intent = PersistedCancellationIntent(
+        placeId: placeId,
+        installationId: entry.installationId
+      )
+      addCancellationIntent(
+        placeId: intent.placeId,
+        installationId: intent.installationId,
+        state: &state
+      )
+      state.requests = sortedManifest(entries)
+      try saveState(&state)
+      _ = try await executeCancellation(intent, state: &state)
+    }
+  }
+
+  private func restoreMissingRegions(state: PersistedGeofenceState) async {
+    guard await isSmartArrivalRuntimeEligible() else {
+      return
+    }
+    let storesByPlaceId = Dictionary(
+      uniqueKeysWithValues: (state.snapshot?.stores ?? []).map {
+        ($0.placeId, $0)
+      }
+    )
+    let pendingLocationNotificationIdentifiers =
+      await notificationCenter.pendingNotificationRequests().compactMap {
+        request -> String? in
+        request.trigger is UNLocationNotificationTrigger
+          ? request.identifier
+          : nil
+      }
+    for entry in state.requests.sorted(by: { $0.placeId < $1.placeId }) {
+      guard
+        entry.status == .pending,
+        let store = storesByPlaceId[entry.placeId]
+      else {
+        continue
+      }
+      _ = await ThereYouGoSmartArrivalRuntime.shared.startMonitoring(
+        descriptor: PendingSmartArrivalRegion(
+          installationId: entry.installationId,
+          location: store.location
+        ),
+        pendingLocationNotificationIdentifiers:
+          pendingLocationNotificationIdentifiers
+      )
+    }
+  }
+
+  private func removeStalePendingDeliveryNotifications(
+    previousIds: [String],
+    retainedIds: [String]
+  ) {
+    let retained = Set(retainedIds)
+    let staleIds = previousIds.filter { !retained.contains($0) }
+    guard !staleIds.isEmpty else {
+      return
+    }
+    notificationCenter.removePendingNotificationRequests(
+      withIdentifiers: staleIds
+    )
+  }
+
+  private func makeDeliveryNotificationRequest(
+    intent: PersistedSmartArrivalDeliveryIntent,
     desired: DesiredStoreNotification
   ) -> UNNotificationRequest {
-    let region = CLCircularRegion(
-      center: CLLocationCoordinate2D(
-        latitude: desired.location.latitude,
-        longitude: desired.location.longitude
-      ),
-      radius: GeofenceNotificationConstants.radiusMeters,
-      identifier: installationId
-    )
-    region.notifyOnEntry = true
-    region.notifyOnExit = false
-
     let content = UNMutableNotificationContent()
     content.title = desired.title
     content.body = desired.body
@@ -1287,35 +1730,21 @@ actor ThereYouGoLocationNotificationReconciler {
     ]
 
     return UNNotificationRequest(
-      identifier: installationId,
+      identifier: intent.notificationId,
       content: content,
-      trigger: UNLocationNotificationTrigger(region: region, repeats: false)
+      trigger: nil
     )
   }
 
   private func verify(
-    request: UNNotificationRequest,
+    region: CLCircularRegion,
     matches desired: DesiredStoreNotification
   ) -> Bool {
-    guard
-      let trigger = request.trigger as? UNLocationNotificationTrigger,
-      let region = trigger.region as? CLCircularRegion,
-      request.content.title == desired.title,
-      request.content.body == desired.body,
-      request.content.userInfo["placeId"] as? String == desired.placeId,
-      request.content.userInfo["requestFingerprint"] as? String == desired.fingerprint,
-      request.content.userInfo["itemIds"] as? [String] == desired.itemIds,
-      parseRevisions(request.content.userInfo["itemRevisions"]) == desired.itemRevisions,
-      abs(region.center.latitude - desired.location.latitude) < 0.000_001,
-      abs(region.center.longitude - desired.location.longitude) < 0.000_001,
-      abs(region.radius - GeofenceNotificationConstants.radiusMeters) < 0.01,
-      region.notifyOnEntry,
-      !region.notifyOnExit,
-      !trigger.repeats
-    else {
-      return false
-    }
-    return true
+    abs(region.center.latitude - desired.location.latitude) < 0.000_001 &&
+      abs(region.center.longitude - desired.location.longitude) < 0.000_001 &&
+      abs(region.radius - GeofenceNotificationConstants.radiusMeters) < 0.01 &&
+      region.notifyOnEntry &&
+      !region.notifyOnExit
   }
 
   private func parseRevisions(_ value: Any?) -> [String: Int]? {
@@ -1343,14 +1772,14 @@ actor ThereYouGoLocationNotificationReconciler {
     entries: [String: PersistedRequestManifestEntry],
     selectedPlaceIds: Set<String>,
     desiredByPlaceId: [String: DesiredStoreNotification],
-    pendingRequests: [UNNotificationRequest]
+    installedRegions: [CLCircularRegion]
   ) -> PersistedRequestManifestEntry? {
     entries.values
       .filter { entry in
         entry.status == .pending &&
           !selectedPlaceIds.contains(entry.placeId) &&
           desiredByPlaceId[entry.placeId] != nil &&
-          pendingRequests.contains(where: {
+          installedRegions.contains(where: {
             $0.identifier == entry.installationId
           })
       }
@@ -1368,7 +1797,7 @@ actor ThereYouGoLocationNotificationReconciler {
   private func isSatisfied(
     desired: DesiredStoreNotification,
     entry: PersistedRequestManifestEntry?,
-    pendingRequests: [UNNotificationRequest]
+    installedRegions: [CLCircularRegion]
   ) -> Bool {
     guard let entry, entry.fingerprint == desired.fingerprint else {
       return false
@@ -1376,12 +1805,12 @@ actor ThereYouGoLocationNotificationReconciler {
     if entry.status == .consumed {
       return true
     }
-    guard let request = pendingRequests.first(where: {
+    guard let region = installedRegions.first(where: {
       $0.identifier == entry.installationId
     }) else {
       return false
     }
-    return verify(request: request, matches: desired)
+    return verify(region: region, matches: desired)
   }
 
   private func cancelAndVerify(
@@ -1400,13 +1829,44 @@ actor ThereYouGoLocationNotificationReconciler {
     notificationCenter.removeDeliveredNotifications(
       withIdentifiers: managedIds
     )
-    let remainingIds = Set(
+    var failed: [String] = []
+    for identifier in managedIds {
+      if await ThereYouGoSmartArrivalRuntime.shared.stopMonitoring(
+        identifier: identifier
+      ) == false {
+        failed.append(identifier)
+      }
+    }
+    let remainingNotificationIds = Set(
       await notificationCenter.pendingNotificationRequests().map(\.identifier)
     )
-    let failed = managedIds.filter(remainingIds.contains)
+    failed.append(contentsOf: managedIds.filter(remainingNotificationIds.contains))
+    failed = uniqueSorted(failed)
     return (
-      managedIds.filter { !remainingIds.contains($0) },
+      managedIds.filter { !failed.contains($0) },
       failed
+    )
+  }
+
+  private func cancelLeftoverManagedLocationTriggers() async {
+    let leftoverIds = await notificationCenter.pendingNotificationRequests()
+      .compactMap { request -> String? in
+        guard
+          request.trigger is UNLocationNotificationTrigger,
+          isManagedIdentifier(request.identifier)
+        else {
+          return nil
+        }
+        return request.identifier
+      }
+    guard !leftoverIds.isEmpty else {
+      return
+    }
+    notificationCenter.removePendingNotificationRequests(
+      withIdentifiers: leftoverIds
+    )
+    notificationCenter.removeDeliveredNotifications(
+      withIdentifiers: leftoverIds
     )
   }
 
@@ -1478,9 +1938,12 @@ actor ThereYouGoLocationNotificationReconciler {
 
   private func makeStateView(
     state: PersistedGeofenceState,
-    pendingRequests: [UNNotificationRequest]
-  ) -> NativeGeofenceStateView {
-    let pendingIds = Set(pendingRequests.map(\.identifier))
+    pendingRequests _: [UNNotificationRequest],
+    installedRegions: [CLCircularRegion]
+  ) async -> NativeGeofenceStateView {
+    let eligibility =
+      await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+    let pendingIds = Set(installedRegions.map(\.identifier))
     let requests = state.requests.map { entry in
       NativeRequestView(
         placeId: entry.placeId,
@@ -1515,20 +1978,56 @@ actor ThereYouGoLocationNotificationReconciler {
       }
       return request.fingerprint != desiredByPlaceId[placeId]?.fingerprint
     }
+    let pendingManagedRequestIds = installedRegions
+      .map(\.identifier)
+      .filter(isManagedIdentifier)
+      .sorted()
     let isDegraded =
       selectedIsDegraded ||
-      !state.pendingCancellations.isEmpty
+      !state.pendingCancellations.isEmpty ||
+      !state.deliveryIntents.isEmpty ||
+      (!pendingManagedRequestIds.isEmpty && !eligibility.canObserve)
 
     return NativeGeofenceStateView(
       snapshot: state.snapshot,
       requests: requests,
       selectedPlaceIds: selectedPlaceIds,
-      pendingManagedRequestIds: pendingRequests
-        .map(\.identifier)
-        .filter(isManagedIdentifier)
-        .sorted(),
-      isDegraded: isDegraded
+      pendingManagedRequestIds: pendingManagedRequestIds,
+      isDegraded: isDegraded,
+      observationEligible: eligibility.canObserve,
+      missingObservationRequirements: eligibility.missingRequirements
     )
+  }
+
+  private func monitoredManagedRegions() async -> [CLCircularRegion] {
+    await ThereYouGoSmartArrivalRuntime.shared.monitoredManagedRegions()
+  }
+
+  private func occupiedRegionIdentifiers(
+    pendingRequests: [UNNotificationRequest]
+  ) async -> Set<String> {
+    await ThereYouGoSmartArrivalRuntime.shared.occupiedIdentifiers(
+      pendingNotificationIdentifiers: pendingRequests.compactMap { request in
+        request.trigger is UNLocationNotificationTrigger
+          ? request.identifier
+          : nil
+      }
+    )
+  }
+
+  private func canRegisterRegion(
+    occupiedIdentifiers: Set<String>,
+    reusableIdentifier: String?
+  ) -> Bool {
+    if let reusableIdentifier, occupiedIdentifiers.contains(reusableIdentifier) {
+      return true
+    }
+    return occupiedIdentifiers.count <
+      GeofenceNotificationConstants.maximumLocationTriggers
+  }
+
+  private func isSmartArrivalRuntimeEligible() async -> Bool {
+    await ThereYouGoSmartArrivalRuntime.shared.isRuntimeEligible
   }
 
   private func manifestByPlaceId(
@@ -1592,13 +2091,17 @@ actor ThereYouGoLocationNotificationReconciler {
       try validateCancellationIntents(state.pendingCancellations)
       let previousObservations = state.observations
       let previousDeliveryIntents = state.deliveryIntents
-      state = try sanitizedStateForPersistence(state)
-      try SmartArrivalStateTransitions.validate(state)
+      let sanitized = try sanitizedStateForPersistence(state)
+      try SmartArrivalStateTransitions.validate(sanitized)
       let repairedTransientState =
-        previousObservations != state.observations ||
-        previousDeliveryIntents != state.deliveryIntents
+        previousObservations != sanitized.observations ||
+        previousDeliveryIntents != sanitized.deliveryIntents
       if migrated || repairedTransientState {
-        try saveState(&state)
+        var unsanitized = state
+        try saveState(&unsanitized)
+        state = unsanitized
+      } else {
+        state = sanitized
       }
       return state
     } catch {
@@ -1628,12 +2131,17 @@ actor ThereYouGoLocationNotificationReconciler {
   }
 
   private func saveState(_ state: inout PersistedGeofenceState) throws {
+    let previousNotificationIds = state.deliveryIntents.map(\.notificationId)
     state = try sanitizedStateForPersistence(state)
     try SmartArrivalStateTransitions.validate(state)
     let data = try encoder.encode(state)
     UserDefaults.standard.set(
       data,
       forKey: GeofenceNotificationConstants.userDefaultsKey
+    )
+    removeStalePendingDeliveryNotifications(
+      previousIds: previousNotificationIds,
+      retainedIds: state.deliveryIntents.map(\.notificationId)
     )
   }
 

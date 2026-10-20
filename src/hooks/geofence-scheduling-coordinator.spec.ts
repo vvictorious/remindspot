@@ -92,6 +92,8 @@ function nativeState(
     selectedPlaceIds: snapshot?.stores.map((store) => store.placeId) ?? [],
     pendingManagedRequestIds: [],
     isDegraded: false,
+    observationEligible: true,
+    missingObservationRequirements: [],
   };
 }
 
@@ -377,6 +379,8 @@ describe('GeofenceSchedulingCoordinator', () => {
       selectedPlaceIds: ['ralphs'],
       pendingManagedRequestIds: ['tyg.arrival.v1.ralphs'],
       isDegraded: false,
+      observationEligible: true,
+      missingObservationRequirements: [],
       requests: [
         {
           placeId: 'ralphs',
@@ -414,6 +418,8 @@ describe('GeofenceSchedulingCoordinator', () => {
     expect(harness.getScheduledAsync).not.toHaveBeenCalled();
     expect(harness.log).toHaveBeenCalledWith('info', 'pending stores', {
       isDegraded: false,
+      observationEligible: true,
+      missingObservationRequirements: [],
       stores: [
         {
           name: 'Ralphs',
@@ -446,6 +452,8 @@ describe('GeofenceSchedulingCoordinator', () => {
           'tyg.arrival.v1.cvs',
         ],
         isDegraded: false,
+        observationEligible: true,
+        missingObservationRequirements: [],
         requests: [
           {
             placeId: 'market',

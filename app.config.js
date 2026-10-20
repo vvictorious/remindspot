@@ -27,13 +27,14 @@ module.exports = ({ config }) => ({
       name,
       {
         ...options,
-        isIosBackgroundLocationEnabled: ARRIVAL_DIAGNOSTIC_ENABLED,
+        isIosBackgroundLocationEnabled: true,
         locationAlwaysAndWhenInUsePermission: ARRIVAL_DIAGNOSTIC_ENABLED
           ? DIAGNOSTIC_ALWAYS_PERMISSION
-          : DEFAULT_ALWAYS_PERMISSION,
+          : (options.locationAlwaysAndWhenInUsePermission ??
+            DEFAULT_ALWAYS_PERMISSION),
         locationAlwaysPermission: ARRIVAL_DIAGNOSTIC_ENABLED
           ? DIAGNOSTIC_ALWAYS_PERMISSION
-          : DEFAULT_ALWAYS_PERMISSION,
+          : (options.locationAlwaysPermission ?? DEFAULT_ALWAYS_PERMISSION),
         motionUsagePermission: ARRIVAL_DIAGNOSTIC_ENABLED
           ? DIAGNOSTIC_MOTION_PERMISSION
           : options.motionUsagePermission,

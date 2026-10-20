@@ -148,6 +148,8 @@ describe('useGeofenceScheduling', () => {
         currentSnapshot?.stores.map((store) => store.placeId) ?? [],
       pendingManagedRequestIds: [],
       isDegraded: false,
+      observationEligible: true,
+      missingObservationRequirements: [],
     }));
     mocks.syncAsync.mockImplementation(
       async (snapshot: NativeCandidateSnapshot) => {
@@ -166,6 +168,8 @@ describe('useGeofenceScheduling', () => {
             selectedPlaceIds: snapshot.stores.map((store) => store.placeId),
             pendingManagedRequestIds: [],
             isDegraded: false,
+            observationEligible: true,
+            missingObservationRequirements: [],
           },
         };
       },

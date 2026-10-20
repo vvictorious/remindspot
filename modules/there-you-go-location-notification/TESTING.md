@@ -11,43 +11,63 @@ Covered without a device:
   per-store walking proximity, conservative drive-away, absolute timeout,
   reconciliation invalidation and reload, registration-bound delivery intents,
   interrupted-delivery recovery decisions, and overlapping observations
+- Portable Smart Arrival runtime checks (`src/native/smart-arrival-runtime.spec.ts`):
+  iOS 18+ eligibility without immediate-notification fallback, explicit missing
+  Always/Precise/Motion/notification requirements, degraded installed regions,
+  missing-region re-registration, conservative 20-slot occupancy, leftover managed
+  trigger cancellation, shared observation streams, and reconstruction deadlines
 
 Not covered without a physical iPhone:
 
-- `UNUserNotificationCenter` add/readback/cancel
+- `CLLocationManager` region registration readback
+- Shared `CLLocationUpdate` / Core Motion observation
 - UserDefaults persistence across process launches
-- Actual location-trigger delivery
+- Background delivery while the process is suspended
 
 Swift remains the runtime source of truth. The TypeScript contract file documents the same rules and cannot schedule notifications.
 
-The Smart Arrival state machine is intentionally not connected to production
-callbacks in Phase 1. Existing `UNLocationNotificationTrigger` registration and
-immediate delivery behavior remain unchanged.
+Production Smart Arrival registers `CLCircularRegion`s and observes entered
+stores for at most 240 seconds. A qualified walking arrival submits one
+immediate local notification and then consumes that registration. The
+notification does not use `UNLocationNotificationTrigger`. Leftover managed
+location-notification triggers are cancelled and are not treated as consumed
+tombstones. Launch restoration and sync count the same 20-slot union of
+monitored regions and pending location triggers. Always location and Motion
+are requested only in the foreground. Missing observation permissions leave an
+installed region degraded instead of restoring immediate geofence delivery.
 
 Portable distance tests deliberately avoid exact radius and drive-away
 boundaries. Swift uses Core Location's device-platform distance calculation;
 the TypeScript contract uses deterministic Haversine distance, so sub-meter
 boundary results are not expected to be bit-for-bit identical.
 
-Delivery recovery is also a state decision only in Phase 1. A known pending
-identifier is not selected for resubmission, and a known delivered identifier
-can be consumed. If iOS no longer reports a notification that was visibly
-delivered before a crash, a later retry may display it again; exactly-once
-visible delivery is not guaranteed.
+Delivery recovery consults pending and delivered identifiers before submission.
+A known pending or delivered identifier is consumed and is not submitted again.
+An unknown identifier is submitted. Successful `add` completion consumes the
+registration immediately. A definite add failure leaves the intent in place.
+If iOS no longer reports a notification that was visibly delivered before a
+crash, a later retry may display it again; exactly-once visible delivery is
+not guaranteed.
 
 ## Manual iPhone verification
 
 Use a development build. `HomeScreen` now drives the native reconciler from
 hydrated items and complete committed Places discovery.
 
-1. Grant notification permission and When In Use location. Do not request Always.
+1. Grant When In Use location. The foreground sync requests Always location and
+   Motion. Precise location, notification permission, Always, and Motion are
+   required before an installed region is observation-eligible. Missing
+   permissions set `isDegraded` and list `missingObservationRequirements`;
+   they must not restore immediate geofence notifications.
 2. Start Metro with the API URL reachable from the iPhone, add a destination
    item, and wait for classification and Places discovery.
    - Metro logs a `[geofence] sync complete` entry.
    - The entry reports at least one `scheduledPlaceId` and no failures.
-3. Background or force-quit the app, then enter one of the scheduled stores.
-   - Expect one notification titled `At <store name>`.
-   - The body lists the associated active item names.
+3. Background or force-quit the app, then enter one of the scheduled stores and
+   walk inside its 100-meter region within 240 seconds.
+   - Smart Arrival submits one immediate notification, `At <store name>`,
+     whose body lists the associated items.
+   - The managed region is then consumed and is no longer pending.
 4. Complete, delete, or edit an associated item before entering the store.
    - Metro logs cancellation or replacement of the obsolete schedule.
    - The obsolete item text must not appear in a later notification.
@@ -70,6 +90,8 @@ console or a temporary debug screen:
    - `notifyOnEntry` is true, `notifyOnExit` is false, `repeats` is false.
    - Title is `At <store name>`.
    - Body lists the associated item names.
+   - This now reads the managed monitored region, not a pending
+     `UNLocationNotificationTrigger`.
 4. Sync the identical snapshot again.
    - `unchangedPlaceIds` contains both stores.
    - Installation IDs do not change.
@@ -88,7 +110,9 @@ console or a temporary debug screen:
    - Only those 15 pending IDs are present.
 8. Sync the original two-store snapshot, force-quit the app, relaunch, then `getStateAsync()`.
    - The persisted snapshot and pending IDs match the last successful sync.
-9. After a real arrival, `getScheduledAsync` returns `null` and a later identical `syncAsync` reports the store in `consumedPlaceIds` without creating a new request.
+9. After a real walking arrival, the notification is delivered and the managed
+   region is consumed. A drive-away or the 240-second deadline ends the
+   observation without a notification.
 
 Use far-away coordinates for diagnostic steps 2-8 so you do not trigger live
 notifications. Use a real nearby store only for step 9.
@@ -111,7 +135,8 @@ notifications. Use a real nearby store only for step 9.
    business name more than 30 meters away.
    - Both remain independently selected.
 5. Background or force-quit the app, disconnect Metro, and verify that entering
-   a 100-meter region still produces the one-shot notification.
+   a 100-meter region and walking there submits one immediate notification.
+   The diagnostic region remains independent of that delivery.
 
 Consumed entries are same-fingerprint tombstones. Because radius participates
 in the fingerprint, changing from 150 to 100 meters treats an already consumed
@@ -426,7 +451,9 @@ npx expo config --type introspect --json | node -e \
 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s).ios.infoPlist;console.log(p.TYGArrivalDiagnosticEnabled,p.UIBackgroundModes??[])})'
 ```
 
-Expected output is `false []`. Finally, in iPhone Settings, change ThereYouGo
+Expected output is `false ["location"]` after Phase 2, because production Smart
+Arrival requires the Location Updates background mode. Finally, in iPhone
+Settings, change ThereYouGo
 from **Always** back to **While Using the App** to restore the original
 permission level. Keep Precise Location enabled for the existing production
 notification behavior. Turn off **Privacy & Security > Motion & Fitness >

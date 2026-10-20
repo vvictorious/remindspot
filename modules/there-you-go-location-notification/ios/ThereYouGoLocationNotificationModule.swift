@@ -98,6 +98,8 @@ struct NativeGeofenceStateRecord: Record {
   @Field var selectedPlaceIds: [String] = []
   @Field var pendingManagedRequestIds: [String] = []
   @Field var isDegraded: Bool = false
+  @Field var observationEligible: Bool = false
+  @Field var missingObservationRequirements: [String] = []
 }
 
 struct NativeSyncFailureRecord: Record {
@@ -117,7 +119,7 @@ struct NativeSyncResultRecord: Record {
 }
 
 public class ThereYouGoLocationNotificationModule: Module {
-  private let reconciler = ThereYouGoLocationNotificationReconciler()
+  private let reconciler = ThereYouGoLocationNotificationReconciler.shared
 
   public func definition() -> ModuleDefinition {
     Name("ThereYouGoLocationNotification")
@@ -186,24 +188,45 @@ public class ThereYouGoLocationNotificationModule: Module {
       (identifier: String) async -> ScheduledLocationNotificationRecord? in
       let requests = await UNUserNotificationCenter.current().pendingNotificationRequests()
 
-      guard
+      if
         let request = requests.first(where: { $0.identifier == identifier }),
         let trigger = request.trigger as? UNLocationNotificationTrigger,
         let region = trigger.region as? CLCircularRegion
+      {
+        let result = ScheduledLocationNotificationRecord()
+        result.identifier = request.identifier
+        result.title = request.content.title
+        result.body = request.content.body
+        result.latitude = region.center.latitude
+        result.longitude = region.center.longitude
+        result.radius = region.radius
+        result.notifyOnEntry = region.notifyOnEntry
+        result.notifyOnExit = region.notifyOnExit
+        result.repeats = trigger.repeats
+        return result
+      }
+
+      guard
+        let region = await ThereYouGoSmartArrivalRuntime.shared.monitoredRegion(
+          identifier: identifier
+        )
       else {
         return nil
       }
 
+      let desired = await reconciler.desiredNotificationContent(
+        forInstallationId: identifier
+      )
       let result = ScheduledLocationNotificationRecord()
-      result.identifier = request.identifier
-      result.title = request.content.title
-      result.body = request.content.body
+      result.identifier = region.identifier
+      result.title = desired?.title ?? ""
+      result.body = desired?.body ?? ""
       result.latitude = region.center.latitude
       result.longitude = region.center.longitude
       result.radius = region.radius
       result.notifyOnEntry = region.notifyOnEntry
       result.notifyOnExit = region.notifyOnExit
-      result.repeats = trigger.repeats
+      result.repeats = false
       return result
     }
 
@@ -301,6 +324,8 @@ private func makeStateRecord(
   record.selectedPlaceIds = state.selectedPlaceIds
   record.pendingManagedRequestIds = state.pendingManagedRequestIds
   record.isDegraded = state.isDegraded
+  record.observationEligible = state.observationEligible
+  record.missingObservationRequirements = state.missingObservationRequirements
   return record
 }
 

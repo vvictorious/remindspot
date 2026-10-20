@@ -7,11 +7,13 @@ import {
   consumeSmartArrivalDeliveryIntent,
   decodeSmartArrivalPersistedState,
   encodeSmartArrivalPersistedState,
+  endSmartArrivalObservationsIfIneligible,
   invalidateSmartArrivalState,
   migrateSmartArrivalPersistedState,
   prepareSmartArrivalStateForPersistence,
   recoverSmartArrivalDeliveries,
   recoverSmartArrivalState,
+  smartArrivalStateAfterSubmission,
   transitionSmartArrivalLocation,
   transitionSmartArrivalMotion,
   transitionSmartArrivalRegionEntry,
@@ -636,7 +638,12 @@ describe('Smart Arrival pure transitions', () => {
     });
     expect(pending.intentsToSubmit).toEqual([]);
     expect(pending.pendingNotificationIds).toEqual([intent.notificationId]);
-    expect(pending.state.deliveryIntents).toEqual([intent]);
+    expect(pending.consumedNotificationIds).toEqual([intent.notificationId]);
+    expect(pending.state.deliveryIntents).toEqual([]);
+    expect(
+      pending.state.requests.find((entry) => entry.placeId === 'store-a')
+        ?.status,
+    ).toBe('consumed');
 
     const delivered = recoverSmartArrivalDeliveries(restored, {
       now: at(20_000),
@@ -657,5 +664,52 @@ describe('Smart Arrival pure transitions', () => {
         intent.notificationId,
       ),
     ).toEqual(delivered.state);
+  });
+
+  it('consumes a successful submission and preserves the intent when add fails', () => {
+    const withIntent = recordWalking(
+      enter(state(), 'store-a'),
+      10_000,
+      location(STORE_A, 10_000),
+    );
+    const [intent] = withIntent.deliveryIntents;
+
+    expect(
+      smartArrivalStateAfterSubmission(
+        withIntent,
+        intent.notificationId,
+        false,
+      ),
+    ).toEqual(withIntent);
+
+    const submitted = smartArrivalStateAfterSubmission(
+      withIntent,
+      intent.notificationId,
+      true,
+    );
+    expect(submitted.deliveryIntents).toEqual([]);
+    expect(submitted.observations).toEqual([]);
+    expect(
+      submitted.requests.find((entry) => entry.placeId === 'store-a')?.status,
+    ).toBe('consumed');
+  });
+
+  it('ends observations when runtime eligibility is lost and keeps delivery intents', () => {
+    const withIntent = recordWalking(
+      enter(enter(state(), 'store-a'), 'store-b'),
+      10_000,
+      location(STORE_A, 10_000),
+    );
+    expect(withIntent.observations.map((observation) => observation.placeId)).toEqual([
+      'store-b',
+    ]);
+
+    const ended = endSmartArrivalObservationsIfIneligible(withIntent, false);
+    expect(ended.observations).toEqual([]);
+    expect(ended.deliveryIntents).toEqual(withIntent.deliveryIntents);
+    expect(ended.requests).toEqual(withIntent.requests);
+    expect(endSmartArrivalObservationsIfIneligible(withIntent, true)).toBe(
+      withIntent,
+    );
   });
 });

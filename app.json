@@ -33,7 +33,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow ThereYouGo to use your location to notify you when you arrive at a relevant place."
+          "locationWhenInUsePermission": "Allow ThereYouGo to use your location to notify you when you arrive at a relevant place.",
+          "locationAlwaysAndWhenInUsePermission": "Allow ThereYouGo to detect when you arrive at a relevant store, even when the app is in the background.",
+          "locationAlwaysPermission": "Allow ThereYouGo to detect when you arrive at a relevant store, even when the app is in the background.",
+          "isIosBackgroundLocationEnabled": true,
+          "motionUsagePermission": "Allow ThereYouGo to use motion activity to confirm that you have arrived at a store on foot."
         }
       ],
       [

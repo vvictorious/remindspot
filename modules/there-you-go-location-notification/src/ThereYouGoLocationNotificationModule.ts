@@ -65,6 +65,8 @@ export type NativeGeofenceState = {
   selectedPlaceIds: string[];
   pendingManagedRequestIds: string[];
   isDegraded: boolean;
+  observationEligible: boolean;
+  missingObservationRequirements: string[];
 };
 
 export type NativeSyncFailure = {

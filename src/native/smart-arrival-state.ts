@@ -441,28 +441,52 @@ export function recoverSmartArrivalDeliveries(
   const pendingIds = new Set(input.pendingNotificationIds);
   const deliveredIds = new Set(input.deliveredNotificationIds);
   const consumedNotificationIds: string[] = [];
+  const consumedPendingNotificationIds: string[] = [];
 
   for (const intent of [...next.deliveryIntents]) {
-    if (!deliveredIds.has(intent.notificationId)) {
+    const isPending = pendingIds.has(intent.notificationId);
+    const isDelivered = deliveredIds.has(intent.notificationId);
+    if (!isPending && !isDelivered) {
       continue;
     }
     next = consumeSmartArrivalDeliveryIntent(next, intent.notificationId);
     consumedNotificationIds.push(intent.notificationId);
+    if (isPending) {
+      consumedPendingNotificationIds.push(intent.notificationId);
+    }
   }
 
   return {
     state: next,
-    intentsToSubmit: next.deliveryIntents
-      .filter((intent) => !pendingIds.has(intent.notificationId))
-      .sort((left, right) =>
-        compareStrings(left.registrationId, right.registrationId),
-      ),
-    pendingNotificationIds: next.deliveryIntents
-      .map((intent) => intent.notificationId)
-      .filter((identifier) => pendingIds.has(identifier))
-      .sort(compareStrings),
+    intentsToSubmit: [...next.deliveryIntents].sort((left, right) =>
+      compareStrings(left.registrationId, right.registrationId),
+    ),
+    pendingNotificationIds: consumedPendingNotificationIds.sort(compareStrings),
     consumedNotificationIds: consumedNotificationIds.sort(compareStrings),
   };
+}
+
+export function endSmartArrivalObservationsIfIneligible(
+  state: SmartArrivalPersistedState,
+  observationEligible: boolean,
+): SmartArrivalPersistedState {
+  if (observationEligible || state.observations.length === 0) {
+    return state;
+  }
+  const next = cloneState(state);
+  next.observations = [];
+  return next;
+}
+
+export function smartArrivalStateAfterSubmission(
+  state: SmartArrivalPersistedState,
+  notificationId: string,
+  succeeded: boolean,
+): SmartArrivalPersistedState {
+  if (!succeeded) {
+    return state;
+  }
+  return consumeSmartArrivalDeliveryIntent(state, notificationId);
 }
 
 export function consumeSmartArrivalDeliveryIntent(

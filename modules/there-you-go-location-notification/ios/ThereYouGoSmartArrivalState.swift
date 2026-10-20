@@ -363,35 +363,57 @@ enum SmartArrivalStateTransitions {
   ) -> SmartArrivalDeliveryRecovery {
     var next = recover(state, at: now)
     var consumedNotificationIds: [String] = []
+    var consumedPendingNotificationIds: [String] = []
 
-    for intent in next.deliveryIntents where
-      deliveredNotificationIds.contains(intent.notificationId)
-    {
+    for intent in Array(next.deliveryIntents) {
+      let isPending = pendingNotificationIds.contains(intent.notificationId)
+      let isDelivered = deliveredNotificationIds.contains(intent.notificationId)
+      guard isPending || isDelivered else {
+        continue
+      }
       next = deliveryConsumed(
         notificationId: intent.notificationId,
         in: next
       )
       consumedNotificationIds.append(intent.notificationId)
+      if isPending {
+        consumedPendingNotificationIds.append(intent.notificationId)
+      }
     }
 
-    let pendingIds = next.deliveryIntents
-      .map(\.notificationId)
-      .filter(pendingNotificationIds.contains)
-      .sorted()
-    let intentsToSubmit = next.deliveryIntents
-      .filter {
-        !pendingNotificationIds.contains($0.notificationId)
-      }
-      .sorted {
-        stringPrecedes($0.registrationId, $1.registrationId)
-      }
+    let intentsToSubmit = next.deliveryIntents.sorted {
+      stringPrecedes($0.registrationId, $1.registrationId)
+    }
 
     return SmartArrivalDeliveryRecovery(
       state: next,
       intentsToSubmit: intentsToSubmit,
-      pendingNotificationIds: pendingIds,
+      pendingNotificationIds: consumedPendingNotificationIds.sorted(),
       consumedNotificationIds: consumedNotificationIds.sorted()
     )
+  }
+
+  static func endObservationsIfIneligible(
+    _ state: PersistedGeofenceState,
+    observationEligible: Bool
+  ) -> PersistedGeofenceState {
+    guard !observationEligible, !state.observations.isEmpty else {
+      return state
+    }
+    var next = state
+    next.observations = []
+    return next
+  }
+
+  static func stateAfterSubmission(
+    _ state: PersistedGeofenceState,
+    notificationId: String,
+    succeeded: Bool
+  ) -> PersistedGeofenceState {
+    guard succeeded else {
+      return state
+    }
+    return deliveryConsumed(notificationId: notificationId, in: state)
   }
 
   static func deliveryConsumed(

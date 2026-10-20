@@ -197,14 +197,23 @@ cannot consume a replacement registration. Reconciliation discards transient
 state when the current snapshot's desired fingerprint no longer matches, even
 if an old registration is retained temporarily as a delivery fallback.
 
-Exactly-once visible notification delivery is not guaranteed. If a process
-stops after iOS presents a notification but before native state is consumed,
-and iOS no longer reports that delivered identifier during recovery, a retry
-can present it again. Phase 2 must preserve the stable identifier, consult both
-pending and delivered requests before submission, and make this at-least-once
-edge explicit rather than claiming stronger system behavior.
+Exactly-once visible notification delivery is not guaranteed. Successful
+`UNUserNotificationCenter.add` completion is the normal consumption boundary:
+the consumed transition is persisted immediately, and the stable notification
+identifier remains available for recovery. If a process stops after iOS accepts
+the notification but before that transition is saved, recovery consumes it when
+the identifier is still pending or delivered. If iOS no longer reports an
+identifier that was visibly delivered before recovery, a later retry can present
+it again. A definite add failure does not consume the registration. Phase 2
+preserves the stable identifier and consults both pending and delivered
+requests before submission.
 
-Phase 1 adds schema migration and pure transitions only. Production region
-registration and notification delivery remain on the existing
-`UNLocationNotificationTrigger` path until the native lifecycle integration is
-implemented and verified.
+Phase 1 added schema migration and pure transitions only. Phase 2 registers
+managed 100-meter `CLCircularRegion`s and shares location and motion
+observation for at most 240 seconds. Phase 3 submits one immediate local
+notification from the persisted delivery intent. Production delivery does not
+use `UNLocationNotificationTrigger`. Missing permissions and iOS versions below
+18 do not restore the immediate-trigger path. Always location and Motion are
+requested only while the app is foregrounded. A monitored installation with a
+missing observation permission or an unsubmitted delivery intent stays degraded
+so it is not reported as ready.

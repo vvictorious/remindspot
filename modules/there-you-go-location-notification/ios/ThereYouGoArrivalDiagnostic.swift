@@ -2520,6 +2520,9 @@ public class ThereYouGoArrivalDiagnosticAppDelegateSubscriber:
     ThereYouGoArrivalDiagnostic.shared.handleLaunch(
       launchedForLocation: launchOptions?[.location] != nil
     )
+    ThereYouGoSmartArrivalRuntime.shared.handleLaunch(
+      launchedForLocation: launchOptions?[.location] != nil
+    )
     return true
   }
 
@@ -2533,6 +2536,7 @@ public class ThereYouGoArrivalDiagnosticAppDelegateSubscriber:
 
   public func applicationDidBecomeActive(_ application: UIApplication) {
     ThereYouGoArrivalDiagnostic.shared.handleDidBecomeActive()
+    ThereYouGoSmartArrivalRuntime.shared.handleDidBecomeActive()
   }
 
   public func applicationWillTerminate(_ application: UIApplication) {

@@ -476,20 +476,12 @@ export function classifyNativeRequestTransition(input: {
     JSON.stringify(input.existing.fingerprintInput) ===
     JSON.stringify(input.desired.fingerprintInput);
 
-  if (
-    sameFingerprint &&
-    (input.existing.status === 'consumed' ||
-      (input.existing.status === 'pending' && !input.existing.isPending))
-  ) {
+  if (sameFingerprint && input.existing.status === 'consumed') {
     return 'consumed-same-fingerprint';
   }
 
-  if (
-    input.existing.status === 'pending' &&
-    input.existing.isPending &&
-    sameFingerprint
-  ) {
-    return 'unchanged';
+  if (input.existing.status === 'pending' && sameFingerprint) {
+    return input.existing.isPending ? 'unchanged' : 'add';
   }
 
   return 'content-change';
