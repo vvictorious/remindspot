@@ -10,8 +10,13 @@ private enum ArrivalDiagnosticConstants {
   static let previousSchemaVersion = 2
   static let regionLimit = 20
   static let maximumEvents = 512
-  static let observationDurationSeconds = 90.0
+  static let observationDurationSeconds = 240.0
   static let migratedBurstDurationSeconds = 45.0
+  static let driveAwayMinimumDistanceMeters = 125.0
+  static let driveAwayDistanceIncreaseMeters = 50.0
+  static let driveAwayMinimumSpeedMetersPerSecond = 4.0
+  static let driveAwayMaximumHorizontalAccuracyMeters = 15.0
+  static let driveAwayMaximumSpeedAccuracyMetersPerSecond = 1.0
   static let freshLocationMaximumAgeSeconds = 15.0
   static let inferredCallbackGapMinimumSeconds = 10.0
   static let historicalLookbackSeconds = 120.0
@@ -1132,6 +1137,7 @@ final class ThereYouGoArrivalDiagnostic:
       executionDurationSeconds: activeObservationDuration(at: now),
       observationIdentifier: observationIdentifier
     )
+    maybeRecordDriveAwayWouldEnd()
   }
 
   @available(iOS 18.0, *)
@@ -1202,10 +1208,13 @@ final class ThereYouGoArrivalDiagnostic:
     beginSetupBackgroundTask(for: observationIdentifier)
     startLiveUpdates(for: observationIdentifier, reconstructed: true)
     startMotionCapture(for: observationIdentifier)
+    // Keep the deadline stored at observation start. Changing the duration
+    // constant does not extend an observation that is already in progress.
     startDeadlineTimer(
       for: observationIdentifier,
       deadline: deadline
     )
+    maybeRecordDriveAwayWouldEnd()
   }
 
   private func startDeadlineTimer(
@@ -2034,6 +2043,7 @@ final class ThereYouGoArrivalDiagnostic:
       source: source,
       observationIdentifier: observationIdentifier
     )
+    maybeRecordDriveAwayWouldEnd()
   }
 
   private func maybeRecordSmartArrivalWouldNotify(
@@ -2059,6 +2069,9 @@ final class ThereYouGoArrivalDiagnostic:
     let decisionAt = Date()
     let walkingStartedAt = timestamp(activity.startDate)
     let elapsed = max(0, decisionAt.timeIntervalSince(observationStartedAt))
+    let freshLocation = latestFreshLocationEvent(
+      observationIdentifier: observationIdentifier
+    )
     appendEvent(
       type: "smart-arrival-would-notify",
       detail: smartArrivalWouldNotifyDetail(
@@ -2068,9 +2081,22 @@ final class ThereYouGoArrivalDiagnostic:
         priorAutomotive: priorAutomotiveEvidence(
           observationIdentifier: observationIdentifier,
           before: activity.startDate
+        ),
+        freshLocation: freshLocation,
+        remainingDeadlineSeconds: remainingDeadlineSeconds(at: decisionAt),
+        backgroundTaskActive: backgroundTaskIdentifier != .invalid,
+        observationReconstructed: observationWasReconstructed(
+          observationIdentifier
         )
       ),
       recordedAt: decisionAt,
+      locationTimestamp: freshLocation?.locationTimestamp,
+      horizontalAccuracyMeters: freshLocation?.horizontalAccuracyMeters,
+      speedMetersPerSecond: freshLocation?.speedMetersPerSecond,
+      speedAccuracyMetersPerSecond: freshLocation?.speedAccuracyMetersPerSecond,
+      distanceFromStoreMeters: freshLocation?.distanceFromStoreMeters,
+      sampleAgeSeconds: freshLocation?.sampleAgeSeconds,
+      isFreshLocation: freshLocation == nil ? nil : true,
       executionDurationSeconds: elapsed,
       activityStartTimestamp: walkingStartedAt,
       activityAutomotive: activity.automotive,
@@ -2149,22 +2175,286 @@ final class ThereYouGoArrivalDiagnostic:
     walkingStartedAt: String,
     decisionAt: String,
     elapsedSeconds: Double,
-    priorAutomotive: PriorAutomotiveEvidence?
+    priorAutomotive: PriorAutomotiveEvidence?,
+    freshLocation: PersistedArrivalDiagnosticEvent?,
+    remainingDeadlineSeconds: Double?,
+    backgroundTaskActive: Bool,
+    observationReconstructed: Bool
   ) -> String {
-    let elapsed = String(
-      format: "%.3f",
-      locale: Locale(identifier: "en_US_POSIX"),
-      elapsedSeconds
-    )
     var detail =
-      "radiusMeters=\(radiusText(ArrivalDiagnosticConstants.radiusMeters));walkingStartedAt=\(walkingStartedAt);decisionAt=\(decisionAt);elapsedSeconds=\(elapsed)"
+      "radiusMeters=\(radiusText(ArrivalDiagnosticConstants.radiusMeters));walkingStartedAt=\(walkingStartedAt);decisionAt=\(decisionAt);elapsedSeconds=\(measurementText(elapsedSeconds))"
     if let priorAutomotive {
       detail +=
         ";priorAutomotiveStart=\(priorAutomotive.activityStartedAt);priorAutomotiveConfidence=\(priorAutomotive.confidence);priorAutomotiveSource=\(priorAutomotive.source)"
     } else {
       detail += ";priorAutomotive=none"
     }
+    if let freshLocation,
+      let distance = freshLocation.distanceFromStoreMeters,
+      let accuracy = freshLocation.horizontalAccuracyMeters,
+      let age = freshLocation.sampleAgeSeconds
+    {
+      let speed = freshLocation.speedMetersPerSecond.map(measurementText)
+        ?? "unavailable"
+      detail +=
+        ";distanceMeters=\(measurementText(distance));speedMetersPerSecond=\(speed);horizontalAccuracyMeters=\(measurementText(accuracy));sampleAgeSeconds=\(measurementText(age))"
+    } else {
+      detail += ";locationSample=none"
+    }
+    if let remainingDeadlineSeconds {
+      detail +=
+        ";remainingDeadlineSeconds=\(measurementText(remainingDeadlineSeconds))"
+    }
+    detail +=
+      ";backgroundTaskActive=\(backgroundTaskActive);observationReconstructed=\(observationReconstructed)"
     return detail
+  }
+
+  private func maybeRecordDriveAwayWouldEnd() {
+    guard let observationIdentifier = state.activeObservationIdentifier else {
+      return
+    }
+    guard !hasDriveAwayDecision(for: observationIdentifier) else {
+      return
+    }
+    guard
+      let evidence = firstDriveAwayEvidence(
+        observationIdentifier: observationIdentifier
+      )
+    else {
+      return
+    }
+
+    let elapsed = activeObservationDuration(at: Date()) ?? 0
+    let location = evidence.location
+    appendEvent(
+      type: "drive-away-would-end",
+      detail: driveAwayWouldEndDetail(
+        location: location,
+        closestDistanceMeters: evidence.closestDistanceMeters,
+        elapsedSeconds: elapsed,
+        automotiveStartedAt: evidence.automotiveStartedAt
+      ),
+      locationTimestamp: location.locationTimestamp,
+      horizontalAccuracyMeters: location.horizontalAccuracyMeters,
+      speedMetersPerSecond: location.speedMetersPerSecond,
+      speedAccuracyMetersPerSecond: location.speedAccuracyMetersPerSecond,
+      distanceFromStoreMeters: location.distanceFromStoreMeters,
+      sampleAgeSeconds: location.sampleAgeSeconds,
+      isFreshLocation: true,
+      executionDurationSeconds: elapsed,
+      activityStartTimestamp: evidence.automotiveStartedAt,
+      activityAutomotive: true,
+      activityStationary: evidence.automotive.activityStationary,
+      activityWalking: false,
+      activityRunning: evidence.automotive.activityRunning,
+      activityUnknown: evidence.automotive.activityUnknown,
+      activityCycling: evidence.automotive.activityCycling,
+      activityConfidence: "high",
+      observationIdentifier: observationIdentifier
+    )
+  }
+
+  private func hasDriveAwayDecision(for observationIdentifier: String) -> Bool {
+    state.events.contains {
+      $0.type == "drive-away-would-end"
+        && $0.observationIdentifier == observationIdentifier
+    }
+  }
+
+  private struct DriveAwayEvidence {
+    let location: PersistedArrivalDiagnosticEvent
+    let closestDistanceMeters: Double
+    let automotive: PersistedArrivalDiagnosticEvent
+    let automotiveStartedAt: String
+  }
+
+  private func firstDriveAwayEvidence(
+    observationIdentifier: String
+  ) -> DriveAwayEvidence? {
+    guard
+      let automotive = latestDriveAwayAutomotive(
+        observationIdentifier: observationIdentifier
+      ),
+      let automotiveStartedAt = automotive.activityStartTimestamp
+    else {
+      return nil
+    }
+
+    for event in state.events {
+      guard
+        event.observationIdentifier == observationIdentifier,
+        driveAwayLocationQualifies(event),
+        let distance = event.distanceFromStoreMeters,
+        let closest = closestAccurateDistanceMeters(
+          observationIdentifier: observationIdentifier,
+          beforeSequence: event.sequence
+        ),
+        distance >=
+          closest + ArrivalDiagnosticConstants.driveAwayDistanceIncreaseMeters
+      else {
+        continue
+      }
+      return DriveAwayEvidence(
+        location: event,
+        closestDistanceMeters: closest,
+        automotive: automotive,
+        automotiveStartedAt: automotiveStartedAt
+      )
+    }
+    return nil
+  }
+
+  private func latestDriveAwayAutomotive(
+    observationIdentifier: String
+  ) -> PersistedArrivalDiagnosticEvent? {
+    guard
+      let observationStartedValue = state.observationStartedAt,
+      let observationStartedAt = parseTimestamp(observationStartedValue)
+    else {
+      return nil
+    }
+
+    var selected: (start: Date, event: PersistedArrivalDiagnosticEvent)?
+    for event in state.events {
+      guard
+        event.observationIdentifier == observationIdentifier,
+        event.type == "activity-classification",
+        event.activityAutomotive == true,
+        event.activityWalking != true,
+        event.activityConfidence == "high",
+        let startValue = event.activityStartTimestamp,
+        let start = parseTimestamp(startValue),
+        start >= observationStartedAt,
+        let source = activityDetailSource(event.detail),
+        source == "live" || source == "historical-query"
+      else {
+        continue
+      }
+      if let selected, start < selected.start {
+        continue
+      }
+      selected = (start, event)
+    }
+    return selected?.event
+  }
+
+  private func driveAwayLocationQualifies(
+    _ event: PersistedArrivalDiagnosticEvent
+  ) -> Bool {
+    guard
+      event.type == "live-location-update",
+      event.isFreshLocation == true,
+      let accuracy = event.horizontalAccuracyMeters,
+      accuracy >= 0,
+      accuracy <=
+        ArrivalDiagnosticConstants.driveAwayMaximumHorizontalAccuracyMeters,
+      let speed = event.speedMetersPerSecond,
+      speed >= ArrivalDiagnosticConstants.driveAwayMinimumSpeedMetersPerSecond,
+      let speedAccuracy = event.speedAccuracyMetersPerSecond,
+      speedAccuracy >= 0,
+      speedAccuracy <=
+        ArrivalDiagnosticConstants.driveAwayMaximumSpeedAccuracyMetersPerSecond,
+      let distance = event.distanceFromStoreMeters,
+      distance >= ArrivalDiagnosticConstants.driveAwayMinimumDistanceMeters,
+      let age = event.sampleAgeSeconds,
+      age >= 0,
+      age <= ArrivalDiagnosticConstants.freshLocationMaximumAgeSeconds
+    else {
+      return false
+    }
+    return true
+  }
+
+  private func closestAccurateDistanceMeters(
+    observationIdentifier: String,
+    beforeSequence sequence: Int
+  ) -> Double? {
+    var closest: Double?
+    for event in state.events {
+      guard
+        event.observationIdentifier == observationIdentifier,
+        event.type == "live-location-update",
+        event.sequence < sequence,
+        event.isFreshLocation == true,
+        let accuracy = event.horizontalAccuracyMeters,
+        accuracy >= 0,
+        accuracy <=
+          ArrivalDiagnosticConstants.driveAwayMaximumHorizontalAccuracyMeters,
+        let distance = event.distanceFromStoreMeters,
+        distance >= 0,
+        let age = event.sampleAgeSeconds,
+        age >= 0,
+        age <= ArrivalDiagnosticConstants.freshLocationMaximumAgeSeconds
+      else {
+        continue
+      }
+      if closest == nil || distance < closest ?? .infinity {
+        closest = distance
+      }
+    }
+    return closest
+  }
+
+  private func driveAwayWouldEndDetail(
+    location: PersistedArrivalDiagnosticEvent,
+    closestDistanceMeters: Double,
+    elapsedSeconds: Double,
+    automotiveStartedAt: String
+  ) -> String {
+    let distance = location.distanceFromStoreMeters ?? 0
+    let speed = location.speedMetersPerSecond ?? 0
+    let accuracy = location.horizontalAccuracyMeters ?? 0
+    let speedAccuracy = location.speedAccuracyMetersPerSecond ?? 0
+    let age = location.sampleAgeSeconds ?? 0
+    return [
+      "distanceMeters=\(measurementText(distance))",
+      "closestDistanceMeters=\(measurementText(closestDistanceMeters))",
+      "distanceIncreaseMeters=\(measurementText(distance - closestDistanceMeters))",
+      "speedMetersPerSecond=\(measurementText(speed))",
+      "horizontalAccuracyMeters=\(measurementText(accuracy))",
+      "speedAccuracyMetersPerSecond=\(measurementText(speedAccuracy))",
+      "sampleAgeSeconds=\(measurementText(age))",
+      "elapsedSeconds=\(measurementText(elapsedSeconds))",
+      "automotiveStartedAt=\(automotiveStartedAt)",
+    ].joined(separator: ";")
+  }
+
+  private func latestFreshLocationEvent(
+    observationIdentifier: String
+  ) -> PersistedArrivalDiagnosticEvent? {
+    state.events.last {
+      $0.observationIdentifier == observationIdentifier
+        && $0.type == "live-location-update"
+        && $0.isFreshLocation == true
+    }
+  }
+
+  private func observationWasReconstructed(
+    _ observationIdentifier: String
+  ) -> Bool {
+    state.events.contains {
+      $0.type == "live-observation-reconstructed"
+        && $0.observationIdentifier == observationIdentifier
+    }
+  }
+
+  private func remainingDeadlineSeconds(at date: Date) -> Double? {
+    guard
+      let value = state.observationDeadline,
+      let deadline = parseTimestamp(value)
+    else {
+      return nil
+    }
+    return max(0, deadline.timeIntervalSince(date))
+  }
+
+  private func measurementText(_ value: Double) -> String {
+    String(
+      format: "%.3f",
+      locale: Locale(identifier: "en_US_POSIX"),
+      value
+    )
   }
 
   private func activityKey(_ activity: CMMotionActivity) -> String {

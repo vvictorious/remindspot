@@ -193,7 +193,9 @@ existing `UNLocationNotificationTrigger`.
   `CLBackgroundActivitySession`.
 - The existing `CLLocationManager` and `CLCircularRegion` continue to own entry
   and exit monitoring. On entry, a default live-update stream and Core Motion
-  capture run against a persisted absolute 90-second deadline. Legacy
+  capture run against a persisted absolute 240-second deadline. A relaunch
+  keeps that stored deadline and does not extend an observation already in
+  progress. Legacy
   `startUpdatingLocation` is never run concurrently or used by this revision.
 - A finite UIKit background task protects setup and initial persistence. Its
   expiration is recorded separately and does not end the live observation or
@@ -210,8 +212,13 @@ existing `UNLocationNotificationTrigger`.
   `smart-arrival-would-notify` event. `recordedAt` is when the diagnostic had
   that evidence; `activityStartTimestamp` remains when Core Motion says
   walking began. Earlier automotive evidence in the same observation is
-  included when it was already recorded and is not required. The event does
-  not schedule or deliver a notification. Raw coordinates are used only in
+  included when it was already recorded and is not required. The event copies
+  the latest fresh location sample and records remaining deadline time, UIKit
+  background-task state, and whether the observation was reconstructed. One
+  passive `drive-away-would-end` event may also be recorded when fresh,
+  accurate automotive departure evidence is present. It does not end the
+  observation, including when walking is detected later. Neither event
+  schedules or delivers a notification. Raw coordinates are used only in
   memory to calculate distance and are neither persisted nor transmitted.
 - Motion permission is requested at arm time while the app is foregrounded.
   Live activity updates are started only for the active observation. A
@@ -225,7 +232,7 @@ Use one legitimate Trader Joe's visit and preserve all earlier logs: arm while
 foregrounded outside the region, verify Always, Precise, Motion, Background App
 Refresh, the location background mode, service-session activity, and region
 registration, then background/lock the phone, enter, park, and walk into the
-store normally. Reopen only after the persisted 90-second deadline.
+store normally. Reopen only after the persisted 240-second deadline.
 
 ### Success criteria
 
@@ -239,7 +246,7 @@ store normally. Reopen only after the persisted 90-second deadline.
   events. A live location update or walking classification after expiration
   but before the deadline is strong feasibility evidence.
 - The recorded end event has an explicit deadline, stream, disable, or
-  authorization reason. Ninety seconds is not described as guaranteed
+  authorization reason. The observation duration is not described as guaranteed
   background execution.
 - Process launch plus service-session and live-observation reconstruction is
   direct reconstruction evidence, but does not identify why the previous
@@ -282,7 +289,12 @@ region entered at 3:05:32 PM. High-confidence automotive was seen immediately
 and ended about 35 seconds later. High-confidence walking was recorded at 52.6
 seconds, and fresh background location updates continued through the 90-second
 window. The production notification arrived while the user was still in the
-car. That history stays in the diagnostic record. The next run requests a
-75-meter region and records `smart-arrival-would-notify` without delivering a
-notification. The visit procedure is documented in
+car. That history stays in the diagnostic record. A later 75-meter visit the
+same evening recorded `smart-arrival-would-notify` at 77.9 seconds without
+delivering a notification. The following iteration keeps schema v3 and that
+history. New observations use a 240-second deadline so one visit can be
+compared with hypothetical 90-, 180-, and 240-second notification deadlines.
+They may record one passive `drive-away-would-end` event. That event does not
+end the observation. Two hundred forty seconds remains an application deadline,
+not guaranteed background execution. The visit procedure is documented in
 `modules/there-you-go-location-notification/TESTING.md`.

@@ -53,3 +53,6 @@ yarn-error.*
 /ios
 /android
 ios-backup-*.tar.gz
+
+# Temporary Smart Arrival diagnostic exports
+/diagnostics/

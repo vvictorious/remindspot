@@ -169,12 +169,14 @@ does not transmit results. `results().radiusMeters` is the current 75-meter
 configuration, including when older events were recorded at 100 meters.
 
 On entry, the diagnostic starts a default `CLLocationUpdate.liveUpdates()`
-stream with an absolute 90-second UTC deadline under a retained foreground-
-established `CLServiceSession(.always)`. It never starts legacy
-`CLLocationManager.startUpdatingLocation` and never creates a
+stream with an absolute 240-second UTC deadline under a retained foreground-
+established `CLServiceSession(.always)`. A relaunch keeps the deadline stored
+at observation start and does not extend it when this duration changes. It never
+starts legacy `CLLocationManager.startUpdatingLocation` and never creates a
 `CLBackgroundActivitySession`. It records one diagnostic
-`smart-arrival-would-notify` event per observation and does not schedule,
-deliver, delay, or suppress production notifications. Arming stops every
+`smart-arrival-would-notify` event per observation and at most one passive
+`drive-away-would-end` event. Neither event schedules, delivers, delays, or
+suppresses production notifications. Arming stops every
 `tyg.diagnostic.arrival.v1.` region, including the former Shell Food Mart
 region `tyg.diagnostic.arrival.v1.shell-3801`, and then registers only the
 Trader Joe's region. A launch while disarmed also retires any non-current
@@ -245,7 +247,7 @@ burst.
    - `liveUpdatesSupported: true`
    - `observationActive: false`
    - `observationDeadline: null`
-   - `observationDurationSeconds: 90`
+   - `observationDurationSeconds: 240`
    - `diagnosticRegionRegistered: true` (allow a few seconds and call
      `status()` again if monitoring has not started yet). This is true only
      when the monitored region identifier matches and its radius reads back
@@ -282,7 +284,7 @@ existing diagnostic history.
    `serviceSessionActive`, and `diagnosticRegionRegistered`.
 2. Background and lock the phone.
 3. Enter the Trader Joe's region, park normally, and walk into the store.
-4. Reopen ThereYouGo only after the persisted 90-second deadline has passed.
+4. Reopen ThereYouGo only after the persisted 240-second deadline has passed.
 5. Print the complete preserved record:
 
 ```js
@@ -317,15 +319,26 @@ The expected sequence is:
 7. optionally `uikit-background-task-expired`
 8. additional location or motion records after that UIKit event
 9. a walking classification if Core Location wakes or runs the app in time
-10. at most one `smart-arrival-would-notify` after a high-confidence walking
+10. at most one `drive-away-would-end` when high-confidence automotive activity
+    after entry coincides with a fresh location at least 125 meters from the
+    store, at least 50 meters farther than the closest accurate sample, and
+    moving at least 4 m/s. Horizontal accuracy must be 15 meters or better and
+    speed accuracy 1 m/s or better. Samples worse than 15 meters, including the
+    loose fixes at observation start, do not count as the closest baseline.
+    This event does not end the observation. A later walking decision is still
+    recorded.
+11. at most one `smart-arrival-would-notify` after a high-confidence walking
     sample whose `activityStartTimestamp` is at or after observation start.
     `recordedAt`, `decisionAt`, and `elapsedSeconds` are when that evidence
     was available. `activityStartTimestamp` and `walkingStartedAt` are when
     Core Motion says walking began. `priorAutomotive=none` is valid;
     automotive fields are included only when an earlier sample in the same
-    observation was already recorded. This event does not schedule a
+    observation was already recorded. The event also copies the latest fresh
+    location's distance, speed, accuracy, and sample age, plus remaining
+    deadline time, whether the UIKit setup task is still active, and whether
+    the observation was reconstructed. This event does not schedule a
     notification, and the observation continues until its deadline.
-11. `observation-ended` with an explicit reason
+12. `observation-ended` with an explicit reason
 
 Possible reasons include `deadline-timer-fired`,
 `deadline-detected-on-live-update`,
@@ -349,7 +362,7 @@ iOS applies region-entry heuristics; boundary callbacks can arrive minutes
 after a crossing and are not guaranteed at exactly 75 meters. The UIKit
 background task is a finite setup/persistence assertion, not a guarantee of
 runtime and not an app-suspension signal. There is no UIKit suspension
-callback. The 90-second value is an absolute observation deadline, not a
+callback. The 240-second value is an absolute observation deadline, not a
 guaranteed background window. If the process is suspended when the deadline
 passes, cleanup occurs on the next Core Location wake or foreground lifecycle
 callback.

@@ -16,9 +16,15 @@ export const ARRIVAL_DIAGNOSTIC_LATITUDE = 34.0203234;
 export const ARRIVAL_DIAGNOSTIC_LONGITUDE = -118.422068;
 export const ARRIVAL_DIAGNOSTIC_RADIUS_METERS = 75;
 export const ARRIVAL_DIAGNOSTIC_RADIUS_TOLERANCE_METERS = 0.01;
-export const ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS = 90;
+export const ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS = 240;
 export const ARRIVAL_DIAGNOSTIC_WOULD_NOTIFY_EVENT_TYPE =
   'smart-arrival-would-notify';
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_EVENT_TYPE = 'drive-away-would-end';
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MINIMUM_DISTANCE_METERS = 125;
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_DISTANCE_INCREASE_METERS = 50;
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MINIMUM_SPEED_METERS_PER_SECOND = 4;
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MAXIMUM_HORIZONTAL_ACCURACY_METERS = 15;
+export const ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MAXIMUM_SPEED_ACCURACY_METERS_PER_SECOND = 1;
 export const ARRIVAL_DIAGNOSTIC_MOTION_LOOKBACK_SECONDS = 120;
 export const ARRIVAL_DIAGNOSTIC_MAX_HISTORICAL_ACTIVITIES = 16;
 export const ARRIVAL_DIAGNOSTIC_HISTORY_QUERY_MAX_SECONDS = 30 * 60;
@@ -168,12 +174,238 @@ export function describeSmartArrivalWouldNotify(input: {
     confidence: ArrivalDiagnosticActivityConfidence;
     source: ArrivalDiagnosticActivitySource;
   } | null;
+  locationSample?: {
+    distanceMeters: number;
+    speedMetersPerSecond: number | null;
+    horizontalAccuracyMeters: number;
+    sampleAgeSeconds: number;
+  } | null;
+  remainingDeadlineSeconds?: number;
+  backgroundTaskActive?: boolean;
+  observationReconstructed?: boolean;
 }): string {
   const radiusMeters = input.radiusMeters ?? ARRIVAL_DIAGNOSTIC_RADIUS_METERS;
   const prior = input.priorAutomotive
     ? `priorAutomotiveStart=${input.priorAutomotive.activityStartedAt};priorAutomotiveConfidence=${input.priorAutomotive.confidence};priorAutomotiveSource=${input.priorAutomotive.source}`
     : 'priorAutomotive=none';
-  return `radiusMeters=${radiusMeters};walkingStartedAt=${input.walkingStartedAt};decisionAt=${input.decisionAt};elapsedSeconds=${input.elapsedSeconds.toFixed(3)};${prior}`;
+  let detail = `radiusMeters=${radiusMeters};walkingStartedAt=${input.walkingStartedAt};decisionAt=${input.decisionAt};elapsedSeconds=${formatMeasurement(input.elapsedSeconds)};${prior}`;
+  if (input.locationSample !== undefined) {
+    detail +=
+      input.locationSample === null
+        ? ';locationSample=none'
+        : `;distanceMeters=${formatMeasurement(input.locationSample.distanceMeters)};speedMetersPerSecond=${formatOptionalMeasurement(input.locationSample.speedMetersPerSecond)};horizontalAccuracyMeters=${formatMeasurement(input.locationSample.horizontalAccuracyMeters)};sampleAgeSeconds=${formatMeasurement(input.locationSample.sampleAgeSeconds)}`;
+  }
+  if (input.remainingDeadlineSeconds !== undefined) {
+    detail += `;remainingDeadlineSeconds=${formatMeasurement(input.remainingDeadlineSeconds)}`;
+  }
+  if (input.backgroundTaskActive !== undefined) {
+    detail += `;backgroundTaskActive=${input.backgroundTaskActive}`;
+  }
+  if (input.observationReconstructed !== undefined) {
+    detail += `;observationReconstructed=${input.observationReconstructed}`;
+  }
+  return detail;
+}
+
+export type ArrivalDiagnosticLocationSample = {
+  sequence: number;
+  fresh: boolean;
+  horizontalAccuracyMeters: number | null;
+  speedMetersPerSecond: number | null;
+  speedAccuracyMetersPerSecond: number | null;
+  distanceFromStoreMeters: number | null;
+};
+
+export function resolveObservationDeadlineMilliseconds(input: {
+  startedAtMilliseconds: number;
+  persistedDeadlineMilliseconds?: number | null;
+  durationSeconds?: number;
+}): number {
+  if (
+    input.persistedDeadlineMilliseconds !== undefined &&
+    input.persistedDeadlineMilliseconds !== null
+  ) {
+    return input.persistedDeadlineMilliseconds;
+  }
+  return (
+    input.startedAtMilliseconds +
+    (input.durationSeconds ?? ARRIVAL_DIAGNOSTIC_OBSERVATION_SECONDS) * 1000
+  );
+}
+
+export function selectLatestFreshLocationSample<T extends { fresh: boolean }>(
+  samples: readonly T[],
+): T | null {
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    const sample = samples[index];
+    if (sample?.fresh) {
+      return sample;
+    }
+  }
+  return null;
+}
+
+export function observationWasReconstructed(
+  eventTypes: readonly string[],
+): boolean {
+  return eventTypes.includes('live-observation-reconstructed');
+}
+
+export function isAccurateFreshDistanceSample(
+  sample: Pick<
+    ArrivalDiagnosticLocationSample,
+    'fresh' | 'horizontalAccuracyMeters' | 'distanceFromStoreMeters'
+  >,
+): boolean {
+  return (
+    sample.fresh &&
+    isFiniteNonNegative(sample.horizontalAccuracyMeters) &&
+    sample.horizontalAccuracyMeters <=
+      ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MAXIMUM_HORIZONTAL_ACCURACY_METERS &&
+    isFiniteNonNegative(sample.distanceFromStoreMeters)
+  );
+}
+
+export function closestAccurateDistanceMeters(
+  samples: readonly ArrivalDiagnosticLocationSample[],
+  beforeSequence: number,
+): number | null {
+  let closest: number | null = null;
+  for (const sample of samples) {
+    if (
+      sample.sequence >= beforeSequence ||
+      !isAccurateFreshDistanceSample(sample) ||
+      sample.distanceFromStoreMeters === null
+    ) {
+      continue;
+    }
+    if (closest === null || sample.distanceFromStoreMeters < closest) {
+      closest = sample.distanceFromStoreMeters;
+    }
+  }
+  return closest;
+}
+
+export function driveAwayLocationEvidenceQualifies(
+  sample: ArrivalDiagnosticLocationSample,
+): boolean {
+  return (
+    isAccurateFreshDistanceSample(sample) &&
+    isFiniteNonNegative(sample.speedMetersPerSecond) &&
+    sample.speedMetersPerSecond >=
+      ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MINIMUM_SPEED_METERS_PER_SECOND &&
+    isFiniteNonNegative(sample.speedAccuracyMetersPerSecond) &&
+    sample.speedAccuracyMetersPerSecond <=
+      ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MAXIMUM_SPEED_ACCURACY_METERS_PER_SECOND &&
+    sample.distanceFromStoreMeters !== null &&
+    sample.distanceFromStoreMeters >=
+      ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_MINIMUM_DISTANCE_METERS
+  );
+}
+
+export function hasQualifyingDriveAwayAutomotiveEvidence(input: {
+  observationStartedAtMilliseconds: number;
+  samples: readonly {
+    source: ArrivalDiagnosticActivitySource;
+    automotive: boolean;
+    walking: boolean;
+    confidence: ArrivalDiagnosticActivityConfidence;
+    activityStartedAtMilliseconds: number;
+  }[];
+}): boolean {
+  return input.samples.some(
+    (sample) =>
+      (sample.source === 'live' || sample.source === 'historical-query') &&
+      sample.automotive &&
+      !sample.walking &&
+      sample.confidence === 'high' &&
+      sample.activityStartedAtMilliseconds >=
+        input.observationStartedAtMilliseconds,
+  );
+}
+
+export function shouldRecordDriveAwayWouldEnd(input: {
+  alreadyRecorded: boolean;
+  automotiveHighConfidenceAfterEntry: boolean;
+  sample: ArrivalDiagnosticLocationSample;
+  closestAccurateDistanceMeters: number | null;
+}): boolean {
+  if (input.alreadyRecorded || !input.automotiveHighConfidenceAfterEntry) {
+    return false;
+  }
+  if (
+    !driveAwayLocationEvidenceQualifies(input.sample) ||
+    input.closestAccurateDistanceMeters === null ||
+    input.sample.distanceFromStoreMeters === null
+  ) {
+    return false;
+  }
+  return (
+    input.sample.distanceFromStoreMeters >=
+    input.closestAccurateDistanceMeters +
+      ARRIVAL_DIAGNOSTIC_DRIVE_AWAY_DISTANCE_INCREASE_METERS
+  );
+}
+
+export function selectFirstDriveAwayLocation<
+  T extends ArrivalDiagnosticLocationSample,
+>(
+  samples: readonly T[],
+  automotiveHighConfidenceAfterEntry: boolean,
+): { sample: T; closestAccurateDistanceMeters: number } | null {
+  if (!automotiveHighConfidenceAfterEntry) {
+    return null;
+  }
+  for (const sample of samples) {
+    const closest = closestAccurateDistanceMeters(samples, sample.sequence);
+    if (
+      closest !== null &&
+      shouldRecordDriveAwayWouldEnd({
+        alreadyRecorded: false,
+        automotiveHighConfidenceAfterEntry: true,
+        sample,
+        closestAccurateDistanceMeters: closest,
+      })
+    ) {
+      return { sample, closestAccurateDistanceMeters: closest };
+    }
+  }
+  return null;
+}
+
+export function describeDriveAwayWouldEnd(input: {
+  distanceMeters: number;
+  closestDistanceMeters: number;
+  speedMetersPerSecond: number;
+  horizontalAccuracyMeters: number;
+  speedAccuracyMetersPerSecond: number;
+  sampleAgeSeconds: number;
+  elapsedSeconds: number;
+  automotiveStartedAt: string;
+}): string {
+  return [
+    `distanceMeters=${formatMeasurement(input.distanceMeters)}`,
+    `closestDistanceMeters=${formatMeasurement(input.closestDistanceMeters)}`,
+    `distanceIncreaseMeters=${formatMeasurement(input.distanceMeters - input.closestDistanceMeters)}`,
+    `speedMetersPerSecond=${formatMeasurement(input.speedMetersPerSecond)}`,
+    `horizontalAccuracyMeters=${formatMeasurement(input.horizontalAccuracyMeters)}`,
+    `speedAccuracyMetersPerSecond=${formatMeasurement(input.speedAccuracyMetersPerSecond)}`,
+    `sampleAgeSeconds=${formatMeasurement(input.sampleAgeSeconds)}`,
+    `elapsedSeconds=${formatMeasurement(input.elapsedSeconds)}`,
+    `automotiveStartedAt=${input.automotiveStartedAt}`,
+  ].join(';');
+}
+
+function formatMeasurement(value: number): string {
+  return value.toFixed(3);
+}
+
+function formatOptionalMeasurement(value: number | null): string {
+  return value === null ? 'unavailable' : formatMeasurement(value);
+}
+
+function isFiniteNonNegative(value: number | null): value is number {
+  return value !== null && Number.isFinite(value) && value >= 0;
 }
 
 const HISTORY_TIMESTAMP =
