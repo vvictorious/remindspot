@@ -8,13 +8,15 @@ import UserNotifications
 // for local Expo modules; see TESTING.md for the manual device procedure.
 
 enum GeofenceNotificationConstants {
-  static let stateSchemaVersion = 1
+  static let stateSchemaVersion = 2
+  static let previousStateSchemaVersion = 1
   static let candidateSchemaVersion = 1
   static let radiusMeters = 100.0
   static let duplicateStoreDistanceMeters = 30.0
   static let maximumSelectedStores = 15
   static let maximumLocationTriggers = 20
   static let managedIdentifierPrefix = "tyg.arrival.v1."
+  static let deliveryIdentifierPrefix = "tyg.arrival.delivery.v1."
   static let userDefaultsKey = "there-you-go.location-notifications.state.v1"
   static let quarantinedUserDefaultsKey =
     "there-you-go.location-notifications.state.quarantined"
@@ -93,32 +95,11 @@ struct PersistedCancellationIntent: Codable, Equatable, Sendable {
   let installationId: String
 }
 
-struct PersistedGeofenceState: Codable, Sendable {
+struct PersistedGeofenceStateV1: Codable, Sendable {
   let schemaVersion: Int
   var snapshot: PersistedCandidateSnapshot?
   var requests: [PersistedRequestManifestEntry]
   var pendingCancellations: [PersistedCancellationIntent]
-
-  static var empty: PersistedGeofenceState {
-    PersistedGeofenceState(
-      schemaVersion: GeofenceNotificationConstants.stateSchemaVersion,
-      snapshot: nil,
-      requests: [],
-      pendingCancellations: []
-    )
-  }
-
-  init(
-    schemaVersion: Int,
-    snapshot: PersistedCandidateSnapshot?,
-    requests: [PersistedRequestManifestEntry],
-    pendingCancellations: [PersistedCancellationIntent]
-  ) {
-    self.schemaVersion = schemaVersion
-    self.snapshot = snapshot
-    self.requests = requests
-    self.pendingCancellations = pendingCancellations
-  }
 
   private enum CodingKeys: String, CodingKey {
     case schemaVersion
@@ -142,6 +123,42 @@ struct PersistedGeofenceState: Codable, Sendable {
       [PersistedCancellationIntent].self,
       forKey: .pendingCancellations
     ) ?? []
+  }
+}
+
+struct PersistedGeofenceState: Codable, Sendable {
+  let schemaVersion: Int
+  var snapshot: PersistedCandidateSnapshot?
+  var requests: [PersistedRequestManifestEntry]
+  var pendingCancellations: [PersistedCancellationIntent]
+  var observations: [PersistedSmartArrivalObservation]
+  var deliveryIntents: [PersistedSmartArrivalDeliveryIntent]
+
+  static var empty: PersistedGeofenceState {
+    PersistedGeofenceState(
+      schemaVersion: GeofenceNotificationConstants.stateSchemaVersion,
+      snapshot: nil,
+      requests: [],
+      pendingCancellations: [],
+      observations: [],
+      deliveryIntents: []
+    )
+  }
+
+  init(
+    schemaVersion: Int,
+    snapshot: PersistedCandidateSnapshot?,
+    requests: [PersistedRequestManifestEntry],
+    pendingCancellations: [PersistedCancellationIntent],
+    observations: [PersistedSmartArrivalObservation],
+    deliveryIntents: [PersistedSmartArrivalDeliveryIntent]
+  ) {
+    self.schemaVersion = schemaVersion
+    self.snapshot = snapshot
+    self.requests = requests
+    self.pendingCancellations = pendingCancellations
+    self.observations = observations
+    self.deliveryIntents = deliveryIntents
   }
 }
 
@@ -498,7 +515,7 @@ actor ThereYouGoLocationNotificationReconciler {
           state: &state
         )
         state.requests = sortedManifest(entries)
-        try saveState(state)
+        try saveState(&state)
         if try await executeCancellation(intent, state: &state) == false {
           failures.append(
             NativeReconciliationFailure(
@@ -511,7 +528,7 @@ actor ThereYouGoLocationNotificationReconciler {
       }
     }
     state.requests = sortedManifest(entries)
-    try saveState(state)
+    try saveState(&state)
 
     let knownInstallationIds = Set(
       entries.values.map(\.installationId) +
@@ -532,7 +549,7 @@ actor ThereYouGoLocationNotificationReconciler {
         installationId: intent.installationId,
         state: &state
       )
-      try saveState(state)
+      try saveState(&state)
       if try await executeCancellation(intent, state: &state) == false {
         failures.append(
           NativeReconciliationFailure(
@@ -602,7 +619,7 @@ actor ThereYouGoLocationNotificationReconciler {
         state: &state
       )
       state.requests = sortedManifest(entries)
-      try saveState(state)
+      try saveState(&state)
       if try await executeCancellation(intent, state: &state) {
         canceledPlaceIds.append(placeId)
       } else {
@@ -619,7 +636,7 @@ actor ThereYouGoLocationNotificationReconciler {
 
     state.snapshot = snapshot
     state.requests = sortedManifest(entries)
-    try saveState(state)
+    try saveState(&state)
     pendingRequests = await notificationCenter.pendingNotificationRequests()
 
     for desired in selected {
@@ -671,7 +688,7 @@ actor ThereYouGoLocationNotificationReconciler {
           state: &state
         )
         state.requests = sortedManifest(entries)
-        try saveState(state)
+        try saveState(&state)
         if try await executeCancellation(intent, state: &state) {
           canceledPlaceIds.append(retirement.placeId)
         } else {
@@ -741,7 +758,7 @@ actor ThereYouGoLocationNotificationReconciler {
           installationId: intent.installationId,
           state: &state
         )
-        try saveState(state)
+        try saveState(&state)
         _ = try await executeCancellation(intent, state: &state)
         failures.append(
           NativeReconciliationFailure(
@@ -773,7 +790,7 @@ actor ThereYouGoLocationNotificationReconciler {
         )
       }
       state.requests = sortedManifest(entries)
-      try saveState(state)
+      try saveState(&state)
       scheduledPlaceIds.append(desired.placeId)
 
       if let oldEntry, oldEntry.status == .pending,
@@ -855,7 +872,7 @@ actor ThereYouGoLocationNotificationReconciler {
         state: &state
       )
       state.requests = sortedManifest(entries)
-      try saveState(state)
+      try saveState(&state)
       if try await executeCancellation(intent, state: &state) {
         canceledPlaceIds.append(entry.placeId)
       } else {
@@ -870,7 +887,7 @@ actor ThereYouGoLocationNotificationReconciler {
     }
 
     state.requests = sortedManifest(entries)
-    try saveState(state)
+    try saveState(&state)
     let finalPendingRequests = await notificationCenter.pendingNotificationRequests()
     let stateView = makeStateView(
       state: state,
@@ -924,13 +941,13 @@ actor ThereYouGoLocationNotificationReconciler {
           state: &state
         )
         state.requests = sortedManifest(entries)
-        try saveState(state)
+        try saveState(&state)
         _ = try await executeCancellation(intent, state: &state)
       }
     }
 
     state.requests = sortedManifest(entries)
-    try saveState(state)
+    try saveState(&state)
 
     let knownInstallationIds = Set(
       entries.values.map(\.installationId) +
@@ -951,7 +968,7 @@ actor ThereYouGoLocationNotificationReconciler {
         installationId: intent.installationId,
         state: &state
       )
-      try saveState(state)
+      try saveState(&state)
       _ = try await executeCancellation(intent, state: &state)
     }
 
@@ -1436,7 +1453,7 @@ actor ThereYouGoLocationNotificationReconciler {
 
     if failed != state.pendingCancellations {
       state.pendingCancellations = failed
-      try saveState(state)
+      try saveState(&state)
     }
     return failed
   }
@@ -1455,7 +1472,7 @@ actor ThereYouGoLocationNotificationReconciler {
     state.pendingCancellations.removeAll {
       $0.installationId == intent.installationId
     }
-    try saveState(state)
+    try saveState(&state)
     return true
   }
 
@@ -1546,12 +1563,43 @@ actor ThereYouGoLocationNotificationReconciler {
     }
 
     do {
-      let state = try decoder.decode(PersistedGeofenceState.self, from: data)
-      guard state.schemaVersion == GeofenceNotificationConstants.stateSchemaVersion else {
+      struct SchemaEnvelope: Decodable {
+        let schemaVersion: Int
+      }
+
+      let envelope = try decoder.decode(SchemaEnvelope.self, from: data)
+      var state: PersistedGeofenceState
+      let migrated: Bool
+      switch envelope.schemaVersion {
+      case GeofenceNotificationConstants.stateSchemaVersion:
+        state = try decoder.decode(PersistedGeofenceState.self, from: data)
+        migrated = false
+      case GeofenceNotificationConstants.previousStateSchemaVersion:
+        let previous = try decoder.decode(PersistedGeofenceStateV1.self, from: data)
+        state = PersistedGeofenceState(
+          schemaVersion: GeofenceNotificationConstants.stateSchemaVersion,
+          snapshot: previous.snapshot,
+          requests: previous.requests,
+          pendingCancellations: previous.pendingCancellations,
+          observations: [],
+          deliveryIntents: []
+        )
+        migrated = true
+      default:
         throw PersistedGeofenceStateError.unsupportedVersion
       }
       _ = try manifestByPlaceId(state.requests)
       try validateCancellationIntents(state.pendingCancellations)
+      let previousObservations = state.observations
+      let previousDeliveryIntents = state.deliveryIntents
+      state = try sanitizedStateForPersistence(state)
+      try SmartArrivalStateTransitions.validate(state)
+      let repairedTransientState =
+        previousObservations != state.observations ||
+        previousDeliveryIntents != state.deliveryIntents
+      if migrated || repairedTransientState {
+        try saveState(&state)
+      }
       return state
     } catch {
       UserDefaults.standard.set(
@@ -1579,11 +1627,32 @@ actor ThereYouGoLocationNotificationReconciler {
     }
   }
 
-  private func saveState(_ state: PersistedGeofenceState) throws {
+  private func saveState(_ state: inout PersistedGeofenceState) throws {
+    state = try sanitizedStateForPersistence(state)
+    try SmartArrivalStateTransitions.validate(state)
     let data = try encoder.encode(state)
     UserDefaults.standard.set(
       data,
       forKey: GeofenceNotificationConstants.userDefaultsKey
+    )
+  }
+
+  private func sanitizedStateForPersistence(
+    _ state: PersistedGeofenceState
+  ) throws -> PersistedGeofenceState {
+    let desiredFingerprintsByPlaceId: [String: String]
+    if let snapshot = state.snapshot {
+      desiredFingerprintsByPlaceId = Dictionary(
+        uniqueKeysWithValues: try desiredNotifications(from: snapshot).map {
+          ($0.placeId, $0.fingerprint)
+        }
+      )
+    } else {
+      desiredFingerprintsByPlaceId = [:]
+    }
+    return SmartArrivalStateTransitions.sanitizedForPersistence(
+      state,
+      desiredFingerprintsByPlaceId: desiredFingerprintsByPlaceId
     )
   }
 

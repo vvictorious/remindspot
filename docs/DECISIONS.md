@@ -168,3 +168,43 @@ failed-category count, which is material when few categories fail. It is
 deferred because correctly merging retried stores and item associations into
 the prior partial result requires a new retry/merge contract; provider logs
 will show whether partial failures occur often enough to prioritize that work.
+
+## Production Smart Arrival — 2026-10-20
+
+### Qualify programmable region entry with motion and proximity
+
+Replace immediate location-trigger delivery with one iOS 18+ native path that
+observes motion for at most 240 seconds after entry into each 100-meter
+production region. Delivery requires high-confidence walking plus a fresh,
+accurate location sample independently within the qualifying store's radius.
+Active stores share location and motion streams, but overlapping stores retain
+independent observations and may produce separate notifications.
+
+Conservative drive-away, timeout, permission or candidate invalidation, and
+successful delivery end the affected observation. Missing permissions do not
+fall back to immediate geofence notifications. Store selection, item matching,
+fingerprints, notification content, and consumed tombstones remain unchanged.
+
+Persist only the evidence needed to resume decisions safely: per-store
+observation identity, registration and fingerprint, absolute timing, closest
+accurate distance, and qualifying automotive/walking timestamps. Persist a
+separate delivery intent before notification side effects so an interrupted
+delivery can distinguish a request still pending in iOS, one retained in the
+delivered-notification center, and one whose identifier is no longer known.
+Observation identities are canonical UUIDs. The intent and its collision-safe
+notification identifier are bound to the originating registration so they
+cannot consume a replacement registration. Reconciliation discards transient
+state when the current snapshot's desired fingerprint no longer matches, even
+if an old registration is retained temporarily as a delivery fallback.
+
+Exactly-once visible notification delivery is not guaranteed. If a process
+stops after iOS presents a notification but before native state is consumed,
+and iOS no longer reports that delivered identifier during recovery, a retry
+can present it again. Phase 2 must preserve the stable identifier, consult both
+pending and delivered requests before submission, and make this at-least-once
+edge explicit rather than claiming stronger system behavior.
+
+Phase 1 adds schema migration and pure transitions only. Production region
+registration and notification delivery remain on the existing
+`UNLocationNotificationTrigger` path until the native lifecycle integration is
+implemented and verified.

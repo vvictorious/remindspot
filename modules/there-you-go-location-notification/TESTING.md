@@ -6,6 +6,11 @@ Covered without a device:
 
 - TypeScript snapshot construction (`src/hooks/geofence-candidate-snapshot.spec.ts`)
 - Portable native contract checks (`src/native/geofence-native-contract.spec.ts`): validation, item-aware 15-store selection, notification copy, and transition classification
+- Portable Smart Arrival state checks (`src/native/smart-arrival-state.spec.ts`):
+  persisted schema-v1 migration, duplicate entry and identifier handling,
+  per-store walking proximity, conservative drive-away, absolute timeout,
+  reconciliation invalidation and reload, registration-bound delivery intents,
+  interrupted-delivery recovery decisions, and overlapping observations
 
 Not covered without a physical iPhone:
 
@@ -14,6 +19,21 @@ Not covered without a physical iPhone:
 - Actual location-trigger delivery
 
 Swift remains the runtime source of truth. The TypeScript contract file documents the same rules and cannot schedule notifications.
+
+The Smart Arrival state machine is intentionally not connected to production
+callbacks in Phase 1. Existing `UNLocationNotificationTrigger` registration and
+immediate delivery behavior remain unchanged.
+
+Portable distance tests deliberately avoid exact radius and drive-away
+boundaries. Swift uses Core Location's device-platform distance calculation;
+the TypeScript contract uses deterministic Haversine distance, so sub-meter
+boundary results are not expected to be bit-for-bit identical.
+
+Delivery recovery is also a state decision only in Phase 1. A known pending
+identifier is not selected for resubmission, and a known delivered identifier
+can be consumed. If iOS no longer reports a notification that was visibly
+delivered before a crash, a later retry may display it again; exactly-once
+visible delivery is not guaranteed.
 
 ## Manual iPhone verification
 
