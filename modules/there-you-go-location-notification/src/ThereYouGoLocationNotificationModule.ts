@@ -85,6 +85,20 @@ export type NativeSyncResult = {
   state: NativeGeofenceState;
 };
 
+export type SmartArrivalDevelopmentEvent = {
+  sequence: number;
+  recordedAt: string;
+  type: string;
+  placeId: string | null;
+  storeName: string | null;
+  detail: string | null;
+};
+
+export type SmartArrivalDevelopmentEventHistory = {
+  droppedEventCount: number;
+  events: SmartArrivalDevelopmentEvent[];
+};
+
 export type ArrivalDiagnosticEvent = {
   sequence: number;
   type: string;
@@ -184,6 +198,8 @@ export type ThereYouGoLocationNotificationModule = {
   cancelAsync(identifier: string): Promise<boolean>;
   syncAsync(snapshot: NativeCandidateSnapshot): Promise<NativeSyncResult>;
   getStateAsync(): Promise<NativeGeofenceState>;
+  getSmartArrivalEventHistoryAsync(): Promise<SmartArrivalDevelopmentEventHistory>;
+  clearSmartArrivalEventHistoryAsync(): Promise<SmartArrivalDevelopmentEventHistory>;
   armArrivalDiagnosticAsync(): Promise<ArrivalDiagnosticStatus>;
   getArrivalDiagnosticStatusAsync(): Promise<ArrivalDiagnosticStatus>;
   getArrivalDiagnosticResultsAsync(): Promise<ArrivalDiagnosticResults>;

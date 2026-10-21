@@ -290,6 +290,14 @@ final class ThereYouGoSmartArrivalRuntime:
     didEnterRegion region: CLRegion
   ) {
     guard isManagedIdentifier(region.identifier), isRuntimeEligible else {
+      #if DEBUG
+      if isManagedIdentifier(region.identifier) {
+        SmartArrivalDevelopmentEventLog.recordRuntimeIneligible(
+          installationId: region.identifier,
+          at: Date()
+        )
+      }
+      #endif
       return
     }
     beginSetupBackgroundTask()

@@ -278,6 +278,16 @@ public class ThereYouGoLocationNotificationModule: Module {
         throw GenericException(error.localizedDescription)
       }
     }
+
+    AsyncFunction("getSmartArrivalEventHistoryAsync") {
+      () -> SmartArrivalDevelopmentEventHistoryRecord in
+      return smartArrivalDevelopmentEventHistory()
+    }
+
+    AsyncFunction("clearSmartArrivalEventHistoryAsync") {
+      () -> SmartArrivalDevelopmentEventHistoryRecord in
+      return clearSmartArrivalDevelopmentEventHistory()
+    }
   }
 }
 

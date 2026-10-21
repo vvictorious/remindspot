@@ -2,6 +2,7 @@ import { registerRootComponent } from 'expo';
 
 import App from './App';
 import './src/diagnostics/arrival-diagnostic-console';
+import './src/diagnostics/smart-arrival-event-console';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,

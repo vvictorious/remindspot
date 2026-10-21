@@ -1047,15 +1047,41 @@ actor ThereYouGoLocationNotificationReconciler {
   func regionEntered(installationId: String, at enteredAt: Date) async {
     await acquireOperation()
     defer { releaseOperation() }
+    let loaded: PersistedGeofenceState
     do {
-      var state = try loadState()
+      loaded = try loadState()
+    } catch {
+      #if DEBUG
+      SmartArrivalDevelopmentEventLog.recordRegionEntry(
+        placeId: nil,
+        storeName: nil,
+        at: enteredAt,
+        detail: "state-unreadable installation=\(installationId)"
+      )
+      #endif
+      return
+    }
+
+    do {
+      var state = loaded
       guard
         let request = state.requests.first(where: {
           $0.installationId == installationId && $0.status == .pending
         })
       else {
+        #if DEBUG
+        SmartArrivalDevelopmentEventLog.recordRegionEntry(
+          placeId: nil,
+          storeName: nil,
+          at: enteredAt,
+          detail: "unmatched installation=\(installationId)"
+        )
+        #endif
         return
       }
+      #if DEBUG
+      let beforeEntry = state
+      #endif
       state = SmartArrivalStateTransitions.regionEntered(
         placeId: request.placeId,
         registrationId: installationId,
@@ -1065,11 +1091,33 @@ actor ThereYouGoLocationNotificationReconciler {
       )
       let eligibility =
         await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+      #if DEBUG
+      let beforeEligibility = state
+      #endif
       state = SmartArrivalStateTransitions.endObservationsIfIneligible(
         state,
         observationEligible: eligibility.canObserve
       )
+      #if DEBUG
+      let proposedEntry = state
+      try saveStateRecordingDevelopmentEvents(&state) {
+        SmartArrivalDevelopmentEventLog.recordRegionEntryResult(
+          before: beforeEntry,
+          after: proposedEntry,
+          placeId: request.placeId,
+          installationId: installationId,
+          at: enteredAt
+        )
+        SmartArrivalDevelopmentEventLog.recordPermissionLoss(
+          before: beforeEligibility,
+          after: proposedEntry,
+          at: enteredAt,
+          missingRequirements: eligibility.missingRequirements
+        )
+      }
+      #else
       try saveState(&state)
+      #endif
     } catch {
       return
     }
@@ -1080,8 +1128,23 @@ actor ThereYouGoLocationNotificationReconciler {
     defer { releaseOperation() }
     do {
       var state = try loadState()
+      #if DEBUG
+      let beforeLocation = state
+      #endif
       state = SmartArrivalStateTransitions.locationObserved(evidence, in: state)
+      #if DEBUG
+      let proposedLocation = state
+      try saveStateRecordingDevelopmentEvents(&state) {
+        SmartArrivalDevelopmentEventLog.recordLocationTransition(
+          before: beforeLocation,
+          after: proposedLocation,
+          evidence: evidence,
+          at: evidence.receivedAt
+        )
+      }
+      #else
       try saveState(&state)
+      #endif
       _ = try await reconcileArrivalDelivery(state: &state)
       try await cancelInstalledConsumedRegions(state: &state)
     } catch {
@@ -1097,12 +1160,27 @@ actor ThereYouGoLocationNotificationReconciler {
     defer { releaseOperation() }
     do {
       var state = try loadState()
+      #if DEBUG
+      let beforeMotion = state
+      #endif
       state = SmartArrivalStateTransitions.motionObserved(
         evidence,
         latestLocation: latestLocation,
         in: state
       )
+      #if DEBUG
+      let proposedMotion = state
+      try saveStateRecordingDevelopmentEvents(&state) {
+        SmartArrivalDevelopmentEventLog.recordMotionTransition(
+          before: beforeMotion,
+          after: proposedMotion,
+          evidence: evidence,
+          latestLocation: latestLocation
+        )
+      }
+      #else
       try saveState(&state)
+      #endif
       _ = try await reconcileArrivalDelivery(state: &state)
       try await cancelInstalledConsumedRegions(state: &state)
     } catch {
@@ -1119,7 +1197,13 @@ actor ThereYouGoLocationNotificationReconciler {
       var state = try loadState()
       let eligibility =
         await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+      #if DEBUG
+      let beforeRecover = state
+      #endif
       var recovered = SmartArrivalStateTransitions.recover(state, at: now)
+      #if DEBUG
+      let beforeEligibility = recovered
+      #endif
       recovered = SmartArrivalStateTransitions.endObservationsIfIneligible(
         recovered,
         observationEligible: eligibility.canObserve
@@ -1128,8 +1212,24 @@ actor ThereYouGoLocationNotificationReconciler {
         recovered.observations != state.observations ||
         recovered.deliveryIntents != state.deliveryIntents
       {
-        state = recovered
+        let proposedRecovery = recovered
+        state = proposedRecovery
+        #if DEBUG
+        try saveStateRecordingDevelopmentEvents(&state) {
+          SmartArrivalDevelopmentEventLog.recordRecoverEnds(
+            before: beforeRecover,
+            at: now
+          )
+          SmartArrivalDevelopmentEventLog.recordPermissionLoss(
+            before: beforeEligibility,
+            after: proposedRecovery,
+            at: now,
+            missingRequirements: eligibility.missingRequirements
+          )
+        }
+        #else
         try saveState(&state)
+        #endif
       }
       let nextDeadline = state.observations
         .compactMap { CandidateSnapshotValidator.iso8601Date($0.deadline) }
@@ -1554,34 +1654,69 @@ actor ThereYouGoLocationNotificationReconciler {
     var failures: [NativeReconciliationFailure] = []
     let eligibility =
       await ThereYouGoSmartArrivalRuntime.shared.observationEligibility()
+    #if DEBUG
+    let beforePermissionLoss = state
+    let permissionLossAt = Date()
+    #endif
     let ended = SmartArrivalStateTransitions.endObservationsIfIneligible(
       state,
       observationEligible: eligibility.canObserve
     )
     if ended.observations != state.observations {
-      state = ended
+      let proposedEnded = ended
+      state = proposedEnded
+      #if DEBUG
+      try saveStateRecordingDevelopmentEvents(&state) {
+        SmartArrivalDevelopmentEventLog.recordPermissionLoss(
+          before: beforePermissionLoss,
+          after: proposedEnded,
+          at: permissionLossAt,
+          missingRequirements: eligibility.missingRequirements
+        )
+      }
+      #else
       try saveState(&state)
+      #endif
     }
 
     let pendingRequests = await notificationCenter.pendingNotificationRequests()
     let deliveredNotifications =
       await notificationCenter.deliveredNotifications()
     let previousNotificationIds = state.deliveryIntents.map(\.notificationId)
+    let recoveredAt = Date()
+    #if DEBUG
+    let beforeRecovery = state
+    #endif
+    let pendingNotificationIds = Set(pendingRequests.map(\.identifier))
+    let deliveredNotificationIds = Set(
+      deliveredNotifications.map(\.request.identifier)
+    )
     let recovery = SmartArrivalStateTransitions.recoverDeliveries(
       state,
-      at: Date(),
-      pendingNotificationIds: Set(pendingRequests.map(\.identifier)),
-      deliveredNotificationIds: Set(
-        deliveredNotifications.map(\.request.identifier)
-      )
+      at: recoveredAt,
+      pendingNotificationIds: pendingNotificationIds,
+      deliveredNotificationIds: deliveredNotificationIds
     )
     if
       recovery.state.requests != state.requests ||
       recovery.state.observations != state.observations ||
       recovery.state.deliveryIntents != state.deliveryIntents
     {
-      state = recovery.state
+      let proposedRecovery = recovery.state
+      state = proposedRecovery
+      #if DEBUG
+      try saveStateRecordingDevelopmentEvents(&state) {
+        SmartArrivalDevelopmentEventLog.recordDeliveryRecovery(
+          before: beforeRecovery,
+          after: proposedRecovery,
+          at: recoveredAt,
+          pendingNotificationIds: pendingNotificationIds,
+          deliveredNotificationIds: deliveredNotificationIds
+        )
+      }
+      #else
       try saveState(&state)
+      #endif
     }
     let retainedNotificationIds = Set(
       state.deliveryIntents.map(\.notificationId) +
@@ -1597,6 +1732,19 @@ actor ThereYouGoLocationNotificationReconciler {
     )
     for intent in recovery.intentsToSubmit {
       guard notificationsAuthorized else {
+        #if DEBUG
+        SmartArrivalDevelopmentEventLog.batch {
+          SmartArrivalDevelopmentEventLog.recordNotificationAttempted(
+            intent: intent,
+            snapshot: state.snapshot
+          )
+          SmartArrivalDevelopmentEventLog.recordNotificationFailed(
+            intent: intent,
+            snapshot: state.snapshot,
+            code: "notification-unauthorized"
+          )
+        }
+        #endif
         failures.append(
           NativeReconciliationFailure(
             placeId: intent.placeId,
@@ -1609,15 +1757,66 @@ actor ThereYouGoLocationNotificationReconciler {
       }
 
       do {
-        try await submitDeliveryIntent(intent, state: state)
-        state = SmartArrivalStateTransitions.stateAfterSubmission(
-          state,
-          notificationId: intent.notificationId,
-          succeeded: true
+        #if DEBUG
+        SmartArrivalDevelopmentEventLog.recordNotificationAttempted(
+          intent: intent,
+          snapshot: state.snapshot
         )
-        try saveState(&state)
+        #endif
+        try await submitDeliveryIntent(intent, state: state)
       } catch DeliverySubmitError.staleIntent {
+        #if DEBUG
+        SmartArrivalDevelopmentEventLog.recordNotificationFailed(
+          intent: intent,
+          snapshot: state.snapshot,
+          code: "stale-intent"
+        )
+        #endif
         try saveState(&state)
+        continue
+      } catch {
+        #if DEBUG
+        SmartArrivalDevelopmentEventLog.recordNotificationFailed(
+          intent: intent,
+          snapshot: state.snapshot,
+          code: "delivery-submit-failed"
+        )
+        #endif
+        failures.append(
+          NativeReconciliationFailure(
+            placeId: intent.placeId,
+            code: "delivery-submit-failed",
+            message: "The qualified arrival notification could not be submitted."
+          )
+        )
+        continue
+      }
+
+      #if DEBUG
+      let beforeSubmission = state
+      #endif
+      state = SmartArrivalStateTransitions.stateAfterSubmission(
+        state,
+        notificationId: intent.notificationId,
+        succeeded: true
+      )
+      do {
+        #if DEBUG
+        let proposedSubmission = state
+        try saveStateRecordingDevelopmentEvents(&state) {
+          SmartArrivalDevelopmentEventLog.recordNotificationSucceeded(
+            intent: intent,
+            snapshot: beforeSubmission.snapshot
+          )
+          SmartArrivalDevelopmentEventLog.recordDeliveredObservations(
+            before: beforeSubmission,
+            after: proposedSubmission,
+            at: Date()
+          )
+        }
+        #else
+        try saveState(&state)
+        #endif
       } catch {
         failures.append(
           NativeReconciliationFailure(
@@ -2152,8 +2351,30 @@ actor ThereYouGoLocationNotificationReconciler {
     }
   }
 
+  #if DEBUG
+  // Stages development events, then writes them only after arrival state is
+  // persisted. `record` observes the transition and must not save state.
+  private func saveStateRecordingDevelopmentEvents(
+    _ state: inout PersistedGeofenceState,
+    record: () -> Void
+  ) throws {
+    SmartArrivalDevelopmentEventLog.beginBatch()
+    record()
+    do {
+      try saveState(&state)
+    } catch {
+      SmartArrivalDevelopmentEventLog.endBatch(commit: false)
+      throw error
+    }
+    SmartArrivalDevelopmentEventLog.endBatch(commit: true)
+  }
+  #endif
+
   private func saveState(_ state: inout PersistedGeofenceState) throws {
     let previousNotificationIds = state.deliveryIntents.map(\.notificationId)
+    #if DEBUG
+    let stateBeforeSanitize = state
+    #endif
     state = try sanitizedStateForPersistence(state)
     try SmartArrivalStateTransitions.validate(state)
     let data = try encoder.encode(state)
@@ -2161,6 +2382,12 @@ actor ThereYouGoLocationNotificationReconciler {
       data,
       forKey: GeofenceNotificationConstants.userDefaultsKey
     )
+    #if DEBUG
+    SmartArrivalDevelopmentEventLog.recordPersistenceInvalidation(
+      before: stateBeforeSanitize,
+      after: state
+    )
+    #endif
     removeStalePendingDeliveryNotifications(
       previousIds: previousNotificationIds,
       retainedIds: state.deliveryIntents.map(\.notificationId)
