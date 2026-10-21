@@ -1153,6 +1153,28 @@ actor ThereYouGoLocationNotificationReconciler {
     }
   }
 
+  func activeObservationContains(_ date: Date) async -> Bool {
+    await acquireOperation()
+    defer { releaseOperation() }
+    guard let state = try? loadState() else {
+      return false
+    }
+    return SmartArrivalStateTransitions.recover(state, at: date).observations
+      .contains { observation in
+        guard
+          let startedAt = CandidateSnapshotValidator.iso8601Date(
+            observation.startedAt
+          ),
+          let deadline = CandidateSnapshotValidator.iso8601Date(
+            observation.deadline
+          )
+        else {
+          return false
+        }
+        return date >= startedAt && date < deadline
+      }
+  }
+
   func desiredNotificationContent(
     forInstallationId installationId: String
   ) async -> DesiredStoreNotification? {

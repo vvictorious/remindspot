@@ -16,7 +16,9 @@ import {
   missingSmartArrivalObservationRequirements,
   smartArrivalInstallationIsDegraded,
   nextObservationDeadline,
+  selectCurrentHistoryActivity,
   shouldFallbackToImmediateGeofenceNotification,
+  type SmartArrivalHistoryActivity,
   shouldReconstructObservationRuntime,
   shouldRetainAlwaysServiceSession,
   shouldRunSharedObservationStreams,
@@ -320,5 +322,88 @@ describe('Smart Arrival observation runtime', () => {
         now: at(1_000),
       }),
     ).toBe(false);
+  });
+});
+
+describe('Smart Arrival current history activity', () => {
+  const observation = {
+    observationStartedAt: STARTED_AT,
+    observationDeadline: at(240_000),
+  };
+  const walk = {
+    activityStartedAt: at(-60_000),
+    automotive: false,
+    walking: true,
+    confidence: 'high' as const,
+  };
+  const driving = {
+    activityStartedAt: at(20_000),
+    automotive: true,
+    walking: false,
+    confidence: 'high' as const,
+  };
+
+  function succeeded(
+    activities: readonly SmartArrivalHistoryActivity[],
+    overrides: { from?: string; to?: string } = {},
+  ) {
+    return selectCurrentHistoryActivity({
+      query: {
+        status: 'success',
+        from: overrides.from ?? at(-120_000),
+        to: overrides.to ?? at(30_000),
+        activities,
+      },
+      ...observation,
+    });
+  }
+
+  it('returns nothing when the query fails, is empty, or misses the observation', () => {
+    expect(
+      selectCurrentHistoryActivity({
+        query: { status: 'failed' },
+        ...observation,
+      }),
+    ).toBeNull();
+    expect(
+      selectCurrentHistoryActivity({
+        query: { status: 'empty' },
+        ...observation,
+      }),
+    ).toBeNull();
+    expect(succeeded([walk], { to: at(-1) })).toBeNull();
+    expect(succeeded([walk], { to: at(240_000) })).toBeNull();
+    expect(succeeded([walk], { from: at(40_000), to: at(30_000) })).toBeNull();
+    expect(
+      succeeded([
+        {
+          ...walk,
+          activityStartedAt: at(31_000),
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it('uses the activity in effect at the query endpoint', () => {
+    expect(succeeded([walk])).toEqual(walk);
+    expect(
+      succeeded([
+        {
+          ...walk,
+          activityStartedAt: at(-180_000),
+        },
+      ]),
+    ).toMatchObject({ walking: true, automotive: false });
+    expect(succeeded([driving, walk])).toEqual(driving);
+    expect(
+      succeeded([
+        walk,
+        {
+          ...walk,
+          activityStartedAt: at(31_000),
+          confidence: 'medium',
+        },
+      ]),
+    ).toEqual(walk);
   });
 });

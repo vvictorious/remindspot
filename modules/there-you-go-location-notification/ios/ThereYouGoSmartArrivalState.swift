@@ -245,22 +245,30 @@ enum SmartArrivalStateTransitions {
     for index in next.observations.indices {
       guard
         let startedAt = date(next.observations[index].startedAt),
-        let deadline = date(next.observations[index].deadline),
-        evidence.activityStartedAt >= startedAt,
-        evidence.activityStartedAt < deadline
+        let deadline = date(next.observations[index].deadline)
       else {
         continue
       }
-      if evidence.automotive && !evidence.walking {
+      let startedDuringObservation =
+        evidence.activityStartedAt >= startedAt &&
+        evidence.activityStartedAt < deadline
+      // A live callback reports the activity that is current now. Its segment
+      // may have started before this observation.
+      let liveDuringObservation =
+        evidence.source == .live &&
+        evidence.receivedAt >= startedAt &&
+        evidence.receivedAt < deadline
+      if evidence.automotive && !evidence.walking && startedDuringObservation {
         next.observations[index].automotiveEvidenceStartedAt = timestamp(
           evidence.activityStartedAt
         )
       }
       if evidence.walking && !evidence.automotive,
-        next.observations[index].walkingEvidenceStartedAt == nil
+        next.observations[index].walkingEvidenceStartedAt == nil,
+        startedDuringObservation || liveDuringObservation
       {
         next.observations[index].walkingEvidenceStartedAt = timestamp(
-          evidence.activityStartedAt
+          max(evidence.activityStartedAt, startedAt)
         )
       }
     }

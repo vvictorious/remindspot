@@ -326,10 +326,19 @@ export function transitionSmartArrivalMotion(
   for (const observation of next.observations) {
     const startedAt = requiredTimestamp(observation.startedAt);
     const deadline = requiredTimestamp(observation.deadline);
-    if (activityStartedAt < startedAt || activityStartedAt >= deadline) {
-      continue;
-    }
-    if (evidence.automotive && !evidence.walking) {
+    const startedDuringObservation =
+      activityStartedAt >= startedAt && activityStartedAt < deadline;
+    // A live callback reports the activity that is current now. Its segment
+    // may have started before this observation.
+    const liveDuringObservation =
+      evidence.source === 'live' &&
+      receivedAt >= startedAt &&
+      receivedAt < deadline;
+    if (
+      evidence.automotive &&
+      !evidence.walking &&
+      startedDuringObservation
+    ) {
       observation.automotiveEvidenceStartedAt = new Date(
         activityStartedAt,
       ).toISOString();
@@ -337,10 +346,11 @@ export function transitionSmartArrivalMotion(
     if (
       evidence.walking &&
       !evidence.automotive &&
-      observation.walkingEvidenceStartedAt == null
+      observation.walkingEvidenceStartedAt == null &&
+      (startedDuringObservation || liveDuringObservation)
     ) {
       observation.walkingEvidenceStartedAt = new Date(
-        activityStartedAt,
+        Math.max(activityStartedAt, startedAt),
       ).toISOString();
     }
   }

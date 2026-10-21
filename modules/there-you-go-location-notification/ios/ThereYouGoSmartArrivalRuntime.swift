@@ -4,6 +4,12 @@ import Foundation
 import UIKit
 import UserNotifications
 
+private enum HistoricalMotionQuery {
+  case failed
+  case empty
+  case activities([CMMotionActivity])
+}
+
 enum SmartArrivalRuntimeConstants {
   static let historicalLookbackSeconds = 120.0
   static let maximumHistoricalActivities = 16
@@ -502,23 +508,37 @@ final class ThereYouGoSmartArrivalRuntime:
     guard let motionManager else {
       return
     }
-    let now = Date()
+    let queriedAt = Date()
     let fetched = await fetchHistoricalActivities(
       using: motionManager,
-      from: now.addingTimeInterval(
+      from: queriedAt.addingTimeInterval(
         -SmartArrivalRuntimeConstants.historicalLookbackSeconds
       ),
-      to: now
-    )
-    let recent = Array(
-      fetched.suffix(SmartArrivalRuntimeConstants.maximumHistoricalActivities)
+      to: queriedAt
     )
     guard streamsStarted, !Task.isCancelled else {
       return
     }
+    guard case .activities(let activities) = fetched else {
+      return
+    }
+    let sorted = activities.sorted { $0.startDate < $1.startDate }
+    let recent = Array(
+      sorted.suffix(SmartArrivalRuntimeConstants.maximumHistoricalActivities)
+    )
     for activity in recent {
       handleMotionActivity(activity, source: .historicalQuery)
     }
+    guard
+      await ThereYouGoLocationNotificationReconciler.shared
+        .activeObservationContains(queriedAt),
+      let current = sorted.last(where: { $0.startDate <= queriedAt })
+    else {
+      return
+    }
+    // This sample is the activity in effect at the query endpoint. It bypasses
+    // dedup so an unchanged walk can reach an observation that started later.
+    submitMotionEvidence(current, source: .live, receivedAt: queriedAt)
   }
 
   private func handleMotionActivity(
@@ -528,13 +548,21 @@ final class ThereYouGoSmartArrivalRuntime:
     guard streamsStarted else {
       return
     }
-    let key = activityKey(activity)
+    let key = activityKey(activity, source: source)
     if !recordedActivityKeys.insert(key).inserted {
       return
     }
+    submitMotionEvidence(activity, source: source)
+  }
+
+  private func submitMotionEvidence(
+    _ activity: CMMotionActivity,
+    source: SmartArrivalMotionSource,
+    receivedAt: Date = Date()
+  ) {
     let evidence = SmartArrivalMotionEvidence(
       source: source,
-      receivedAt: Date(),
+      receivedAt: receivedAt,
       activityStartedAt: activity.startDate,
       automotive: activity.automotive,
       walking: activity.walking,
@@ -553,14 +581,23 @@ final class ThereYouGoSmartArrivalRuntime:
     using motionManager: CMMotionActivityManager,
     from start: Date,
     to end: Date
-  ) async -> [CMMotionActivity] {
+  ) async -> HistoricalMotionQuery {
     await withCheckedContinuation { continuation in
       motionManager.queryActivityStarting(
         from: start,
         to: end,
         to: motionCallbackQueue
-      ) { activities, _ in
-        continuation.resume(returning: activities ?? [])
+      ) { activities, error in
+        if error != nil {
+          continuation.resume(returning: .failed)
+          return
+        }
+        let activities = activities ?? []
+        guard !activities.isEmpty else {
+          continuation.resume(returning: .empty)
+          return
+        }
+        continuation.resume(returning: .activities(activities))
       }
     }
   }
@@ -770,8 +807,21 @@ final class ThereYouGoSmartArrivalRuntime:
     }
   }
 
-  private func activityKey(_ activity: CMMotionActivity) -> String {
-    [
+  private func activityKey(
+    _ activity: CMMotionActivity,
+    source: SmartArrivalMotionSource
+  ) -> String {
+    let sourceLabel: String
+    switch source {
+    case .live:
+      sourceLabel = "live"
+    case .historicalQuery:
+      sourceLabel = "historical"
+    case .authorizationPrompt:
+      sourceLabel = "prompt"
+    }
+    return [
+      sourceLabel,
       String(activity.startDate.timeIntervalSince1970),
       activity.automotive ? "1" : "0",
       activity.walking ? "1" : "0",

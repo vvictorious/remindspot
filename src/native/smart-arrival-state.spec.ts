@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import type { NativeContractSnapshot } from './geofence-native-contract';
 import {
+  selectCurrentHistoryActivity,
+  type SmartArrivalHistoryActivity,
+} from './smart-arrival-runtime';
+import {
   SMART_ARRIVAL_DELIVERY_IDENTIFIER_PREFIX,
   SMART_ARRIVAL_OBSERVATION_SECONDS,
   consumeSmartArrivalDeliveryIntent,
@@ -296,7 +300,7 @@ describe('Smart Arrival pure transitions', () => {
     ).toBe(true);
   });
 
-  it('requires high-confidence walking that starts after entry', () => {
+  it('rejects medium-confidence, future, and historical pre-entry walking', () => {
     const entered = enter(state(), 'store-a');
     const mediumConfidence = transitionSmartArrivalMotion(
       entered,
@@ -310,17 +314,29 @@ describe('Smart Arrival pure transitions', () => {
       },
       location(STORE_A, 10_000),
     );
-    const preEntryWalking = transitionSmartArrivalMotion(
+    const historicalPreEntryWalking = transitionSmartArrivalMotion(
       entered,
       {
         source: 'historical-query',
         receivedAt: at(10_000),
-        activityStartedAt: at(-1),
+        activityStartedAt: at(-60_000),
         automotive: false,
         walking: true,
         confidence: 'high',
       },
       location(STORE_A, 10_000),
+    );
+    const earlyLiveCallback = transitionSmartArrivalMotion(
+      entered,
+      {
+        source: 'live',
+        receivedAt: at(-1),
+        activityStartedAt: at(-60_000),
+        automotive: false,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_A, 1_000, { timestamp: at(-1), receivedAt: at(-1) }),
     );
     const futureWalking = transitionSmartArrivalMotion(
       entered,
@@ -339,14 +355,392 @@ describe('Smart Arrival pure transitions', () => {
     expect(
       mediumConfidence.observations[0]?.walkingEvidenceStartedAt ?? null,
     ).toBeNull();
-    expect(preEntryWalking.deliveryIntents).toEqual([]);
+    expect(historicalPreEntryWalking.deliveryIntents).toEqual([]);
     expect(
-      preEntryWalking.observations[0]?.walkingEvidenceStartedAt ?? null,
+      historicalPreEntryWalking.observations[0]?.walkingEvidenceStartedAt ??
+        null,
+    ).toBeNull();
+    expect(earlyLiveCallback.deliveryIntents).toEqual([]);
+    expect(
+      earlyLiveCallback.observations[0]?.walkingEvidenceStartedAt ?? null,
     ).toBeNull();
     expect(futureWalking.deliveryIntents).toEqual([]);
     expect(
       futureWalking.observations[0]?.walkingEvidenceStartedAt ?? null,
     ).toBeNull();
+  });
+
+  it('accepts a live high-confidence walk that started before entry', () => {
+    const entered = enter(state(), 'store-a');
+    const walking = {
+      source: 'live' as const,
+      receivedAt: at(5_000),
+      activityStartedAt: at(-60_000),
+      automotive: false,
+      walking: true,
+      confidence: 'high' as const,
+    };
+
+    const recorded = transitionSmartArrivalMotion(entered, walking);
+    expect(recorded.deliveryIntents).toEqual([]);
+    expect(recorded.observations[0]?.walkingEvidenceStartedAt).toBe(STARTED_AT);
+
+    const staleLocation = transitionSmartArrivalMotion(
+      entered,
+      walking,
+      location(STORE_A, 5_000, { timestamp: at(-1) }),
+    );
+    expect(staleLocation.deliveryIntents).toEqual([]);
+    expect(staleLocation.observations[0]?.walkingEvidenceStartedAt).toBe(
+      STARTED_AT,
+    );
+
+    const qualified = transitionSmartArrivalMotion(
+      entered,
+      { ...walking, receivedAt: STARTED_AT },
+      location(STORE_A, 0),
+    );
+    expect(qualified.observations).toEqual([]);
+    expect(qualified.deliveryIntents).toHaveLength(1);
+    expect(qualified.deliveryIntents[0]?.placeId).toBe('store-a');
+  });
+
+  it('records post-entry walking at the activity start', () => {
+    const entered = enter(state(), 'store-a');
+    const live = transitionSmartArrivalMotion(entered, {
+      source: 'live',
+      receivedAt: at(10_000),
+      activityStartedAt: at(2_500),
+      automotive: false,
+      walking: true,
+      confidence: 'high',
+    });
+    const historical = transitionSmartArrivalMotion(entered, {
+      source: 'historical-query',
+      receivedAt: at(10_000),
+      activityStartedAt: at(2_500),
+      automotive: false,
+      walking: true,
+      confidence: 'high',
+    });
+
+    expect(live.observations[0]?.walkingEvidenceStartedAt).toBe(at(2_500));
+    expect(historical.observations[0]?.walkingEvidenceStartedAt).toBe(
+      at(2_500),
+    );
+    expect(live.deliveryIntents).toEqual([]);
+  });
+
+  it('does not treat driving or contradictory motion as walking', () => {
+    const entered = enter(state(), 'store-a');
+    const preEntryDriving = transitionSmartArrivalMotion(
+      entered,
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        activityStartedAt: at(-30_000),
+        automotive: true,
+        walking: false,
+        confidence: 'high',
+      },
+      location(STORE_A, 5_000),
+    );
+    const contradictory = transitionSmartArrivalMotion(
+      entered,
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        activityStartedAt: at(-30_000),
+        automotive: true,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_A, 5_000),
+    );
+    const contradictoryAfterEntry = transitionSmartArrivalMotion(
+      entered,
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        activityStartedAt: at(1_000),
+        automotive: true,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_A, 5_000),
+    );
+
+    expect(preEntryDriving.deliveryIntents).toEqual([]);
+    expect(
+      preEntryDriving.observations[0]?.automotiveEvidenceStartedAt ?? null,
+    ).toBeNull();
+    expect(
+      preEntryDriving.observations[0]?.walkingEvidenceStartedAt ?? null,
+    ).toBeNull();
+    expect(contradictory.deliveryIntents).toEqual([]);
+    expect(
+      contradictory.observations[0]?.walkingEvidenceStartedAt ?? null,
+    ).toBeNull();
+    expect(
+      contradictory.observations[0]?.automotiveEvidenceStartedAt ?? null,
+    ).toBeNull();
+    expect(contradictoryAfterEntry.deliveryIntents).toEqual([]);
+    expect(
+      contradictoryAfterEntry.observations[0]?.walkingEvidenceStartedAt ??
+        null,
+    ).toBeNull();
+    expect(
+      contradictoryAfterEntry.observations[0]?.automotiveEvidenceStartedAt ??
+        null,
+    ).toBeNull();
+  });
+
+  it('qualifies overlapping stores from one live walk that started before entry', () => {
+    const nearbyState = state();
+    nearbyState.snapshot!.stores[1]!.location = {
+      latitude: STORE_A.latitude + 0.0005,
+      longitude: STORE_A.longitude,
+    };
+    const entered = enter(enter(nearbyState, 'store-a'), 'store-b');
+    const qualified = transitionSmartArrivalMotion(
+      entered,
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        activityStartedAt: at(-60_000),
+        automotive: false,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_A, 5_000),
+    );
+
+    expect(qualified.observations).toEqual([]);
+    expect(qualified.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+      'store-b',
+    ]);
+  });
+
+  it('qualifies a store entered while an earlier live walk is still current', () => {
+    const walkStartedAt = at(-60_000);
+    let current = transitionSmartArrivalMotion(
+      enter(state(), 'store-a'),
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        activityStartedAt: walkStartedAt,
+        automotive: false,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_A, 5_000),
+    );
+    expect(current.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+    ]);
+
+    current = transitionSmartArrivalRegionEntry(current, {
+      placeId: 'store-b',
+      registrationId: 'tyg.arrival.v1.store-b',
+      observationIdentifier: OBSERVATION_B,
+      enteredAt: at(30_000),
+    });
+    const replayed = transitionSmartArrivalMotion(current, {
+      source: 'live',
+      receivedAt: at(31_000),
+      activityStartedAt: walkStartedAt,
+      automotive: false,
+      walking: true,
+      confidence: 'high',
+    });
+    expect(replayed.observations).toHaveLength(1);
+    expect(replayed.observations[0]?.walkingEvidenceStartedAt).toBe(at(30_000));
+    expect(replayed.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+    ]);
+
+    const qualified = transitionSmartArrivalMotion(
+      current,
+      {
+        source: 'live',
+        receivedAt: at(31_000),
+        activityStartedAt: walkStartedAt,
+        automotive: false,
+        walking: true,
+        confidence: 'high',
+      },
+      location(STORE_B, 31_000),
+    );
+    expect(qualified.observations).toEqual([]);
+    expect(qualified.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+      'store-b',
+    ]);
+  });
+
+  it('qualifies the next store from a current walk and not from an ended one', () => {
+    const walkStartedAt = at(-60_000);
+    const walk: SmartArrivalHistoryActivity = {
+      activityStartedAt: walkStartedAt,
+      automotive: false,
+      walking: true,
+      confidence: 'high',
+    };
+    const driving: SmartArrivalHistoryActivity = {
+      activityStartedAt: at(20_000),
+      automotive: true,
+      walking: false,
+      confidence: 'high',
+    };
+    let current = transitionSmartArrivalMotion(
+      enter(state(), 'store-a'),
+      {
+        source: 'live',
+        receivedAt: at(5_000),
+        ...walk,
+      },
+      location(STORE_A, 5_000),
+    );
+    current = transitionSmartArrivalRegionEntry(current, {
+      placeId: 'store-b',
+      registrationId: 'tyg.arrival.v1.store-b',
+      observationIdentifier: OBSERVATION_B,
+      enteredAt: at(30_000),
+    });
+    const observation = {
+      observationStartedAt: at(30_000),
+      observationDeadline: at(30_000 + SMART_ARRIVAL_OBSERVATION_SECONDS * 1000),
+    };
+    const queryTo = at(31_000);
+
+    const stillWalking = selectCurrentHistoryActivity({
+      query: {
+        status: 'success',
+        from: at(31_000 - 120_000),
+        to: queryTo,
+        activities: [walk],
+      },
+      ...observation,
+    });
+    expect(stillWalking).toEqual(walk);
+    const historicalOnly = transitionSmartArrivalMotion(
+      current,
+      {
+        source: 'historical-query',
+        receivedAt: queryTo,
+        ...walk,
+      },
+      location(STORE_B, 31_000),
+    );
+    expect(historicalOnly.observations).toHaveLength(1);
+    expect(
+      historicalOnly.observations[0]?.walkingEvidenceStartedAt ?? null,
+    ).toBeNull();
+    expect(historicalOnly.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+    ]);
+
+    const continued = transitionSmartArrivalMotion(
+      current,
+      {
+        source: 'live',
+        receivedAt: queryTo,
+        ...walk,
+      },
+      location(STORE_B, 31_000),
+    );
+    const duplicate = transitionSmartArrivalMotion(
+      continued,
+      {
+        source: 'live',
+        receivedAt: queryTo,
+        ...walk,
+      },
+      location(STORE_B, 32_000),
+    );
+    expect(duplicate.observations).toEqual([]);
+    expect(duplicate.deliveryIntents).toEqual(continued.deliveryIntents);
+    expect(duplicate.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+      'store-b',
+    ]);
+
+    expect(
+      selectCurrentHistoryActivity({
+        query: { status: 'failed' },
+        ...observation,
+      }),
+    ).toBeNull();
+    expect(
+      selectCurrentHistoryActivity({
+        query: { status: 'empty' },
+        ...observation,
+      }),
+    ).toBeNull();
+    expect(current.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+    ]);
+    expect(current.observations[0]?.walkingEvidenceStartedAt ?? null).toBeNull();
+
+    const nowDriving = selectCurrentHistoryActivity({
+      query: {
+        status: 'success',
+        from: at(31_000 - 120_000),
+        to: queryTo,
+        activities: [walk, driving],
+      },
+      ...observation,
+    });
+    expect(nowDriving).toEqual(driving);
+    const driven = transitionSmartArrivalMotion(
+      historicalOnly,
+      {
+        source: 'live',
+        receivedAt: queryTo,
+        ...driving,
+      },
+      location(STORE_B, 31_000),
+    );
+    expect(driven.observations).toHaveLength(1);
+    expect(driven.observations[0]?.walkingEvidenceStartedAt ?? null).toBeNull();
+    expect(driven.observations[0]?.automotiveEvidenceStartedAt ?? null).toBeNull();
+    expect(driven.deliveryIntents.map((intent) => intent.placeId)).toEqual([
+      'store-a',
+    ]);
+  });
+
+  it('applies a duplicate live walking callback once', () => {
+    const entered = enter(state(), 'store-a');
+    const evidence = {
+      source: 'live' as const,
+      receivedAt: at(5_000),
+      activityStartedAt: at(-60_000),
+      automotive: false,
+      walking: true,
+      confidence: 'high' as const,
+    };
+
+    const twice = transitionSmartArrivalMotion(
+      transitionSmartArrivalMotion(entered, evidence),
+      { ...evidence, receivedAt: at(8_000) },
+    );
+    expect(twice.observations).toHaveLength(1);
+    expect(twice.observations[0]?.walkingEvidenceStartedAt).toBe(STARTED_AT);
+    expect(twice.deliveryIntents).toEqual([]);
+
+    const notified = transitionSmartArrivalMotion(
+      twice,
+      evidence,
+      location(STORE_A, 5_000),
+    );
+    const duplicate = transitionSmartArrivalMotion(
+      notified,
+      { ...evidence, receivedAt: at(6_000) },
+      location(STORE_A, 6_000),
+    );
+    expect(duplicate.deliveryIntents).toHaveLength(1);
+    expect(duplicate.deliveryIntents).toEqual(notified.deliveryIntents);
   });
 
   it('rejects pre-entry location evidence and accepts the exact entry boundary', () => {

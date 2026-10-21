@@ -226,3 +226,66 @@ export function leftoverManagedLocationTriggerIds(
 export function observationDurationSeconds(): number {
   return SMART_ARRIVAL_OBSERVATION_SECONDS;
 }
+
+export type SmartArrivalHistoryActivity = {
+  activityStartedAt: string;
+  automotive: boolean;
+  walking: boolean;
+  confidence: 'low' | 'medium' | 'high';
+};
+
+export type SmartArrivalHistoryQuery =
+  | { status: 'failed' }
+  | { status: 'empty' }
+  | {
+      status: 'success';
+      from: string;
+      to: string;
+      activities: readonly SmartArrivalHistoryActivity[];
+    };
+
+export function selectCurrentHistoryActivity(input: {
+  query: SmartArrivalHistoryQuery;
+  observationStartedAt: string;
+  observationDeadline: string;
+}): SmartArrivalHistoryActivity | null {
+  if (input.query.status !== 'success') {
+    return null;
+  }
+  const from = timestampMilliseconds(input.query.from);
+  const to = timestampMilliseconds(input.query.to);
+  const observationStartedAt = timestampMilliseconds(input.observationStartedAt);
+  const observationDeadline = timestampMilliseconds(input.observationDeadline);
+  if (
+    from === null ||
+    to === null ||
+    observationStartedAt === null ||
+    observationDeadline === null ||
+    from > to ||
+    to < observationStartedAt ||
+    to >= observationDeadline
+  ) {
+    return null;
+  }
+
+  const inEffect = input.query.activities
+    .map((activity) => ({
+      activity,
+      startedAt: timestampMilliseconds(activity.activityStartedAt),
+    }))
+    .filter(
+      (
+        item,
+      ): item is {
+        activity: SmartArrivalHistoryActivity;
+        startedAt: number;
+      } => item.startedAt !== null && item.startedAt <= to,
+    )
+    .sort((left, right) => left.startedAt - right.startedAt);
+  return inEffect.at(-1)?.activity ?? null;
+}
+
+function timestampMilliseconds(value: string): number | null {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
