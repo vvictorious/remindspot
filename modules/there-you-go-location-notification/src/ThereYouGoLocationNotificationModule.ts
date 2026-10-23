@@ -209,6 +209,10 @@ export type ThereYouGoLocationNotificationModule = {
     from: string,
     to: string,
   ): Promise<ArrivalDiagnosticHistoryQuery>;
+  startVisitDiagnosticAsync(): Promise<string>;
+  stopVisitDiagnosticAsync(): Promise<string>;
+  getVisitDiagnosticResultsAsync(): Promise<string>;
+  clearVisitDiagnosticResultsAsync(): Promise<string>;
 };
 
 export default requireOptionalNativeModule<ThereYouGoLocationNotificationModule>(

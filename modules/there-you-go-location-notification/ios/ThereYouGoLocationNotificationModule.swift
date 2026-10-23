@@ -288,8 +288,52 @@ public class ThereYouGoLocationNotificationModule: Module {
       () -> SmartArrivalDevelopmentEventHistoryRecord in
       return clearSmartArrivalDevelopmentEventHistory()
     }
+
+    AsyncFunction("startVisitDiagnosticAsync") { () async throws -> String in
+      #if DEBUG
+      do {
+        return try await ThereYouGoVisitDiagnostic.shared.start()
+      } catch {
+        throw GenericException(error.localizedDescription)
+      }
+      #else
+      throw GenericException(
+        "The visit diagnostic is compiled into debug builds only."
+      )
+      #endif
+    }
+
+    AsyncFunction("stopVisitDiagnosticAsync") { () async -> String in
+      #if DEBUG
+      return await ThereYouGoVisitDiagnostic.shared.stop()
+      #else
+      return unavailableVisitDiagnosticResult()
+      #endif
+    }
+
+    AsyncFunction("getVisitDiagnosticResultsAsync") { () async -> String in
+      #if DEBUG
+      return await ThereYouGoVisitDiagnostic.shared.results()
+      #else
+      return unavailableVisitDiagnosticResult()
+      #endif
+    }
+
+    AsyncFunction("clearVisitDiagnosticResultsAsync") { () async -> String in
+      #if DEBUG
+      return await ThereYouGoVisitDiagnostic.shared.clear()
+      #else
+      return unavailableVisitDiagnosticResult()
+      #endif
+    }
   }
 }
+
+#if !DEBUG
+private func unavailableVisitDiagnosticResult() -> String {
+  #"{"schemaVersion":1,"available":false,"isMonitoring":false,"detail":"debug-build-required","events":[]}"#
+}
+#endif
 
 private func makeSyncResultRecord(
   _ report: NativeSyncReport

@@ -256,6 +256,8 @@ export class GeofenceSchedulingCoordinator {
       isDegraded: state.isDegraded,
       observationEligible: state.observationEligible,
       missingObservationRequirements: state.missingObservationRequirements,
+      discoveryAnchor: state.snapshot?.discoveryAnchor ?? null,
+      generatedAt: state.snapshot?.generatedAt ?? null,
     });
   }
 
