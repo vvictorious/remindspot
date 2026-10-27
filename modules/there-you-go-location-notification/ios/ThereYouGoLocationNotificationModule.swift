@@ -118,6 +118,29 @@ struct NativeSyncResultRecord: Record {
   @Field var state: NativeGeofenceStateRecord = NativeGeofenceStateRecord()
 }
 
+struct BackgroundDiscoveryItemInputRecord: Record {
+  @Field var id: String = ""
+  @Field var revision: Int = 0
+  @Field var text: String = ""
+  @Field var taxonomyVersion: Int = 0
+  @Field var categories: [String] = []
+}
+
+struct BackgroundDiscoveryInputRecord: Record {
+  @Field var schemaVersion: Int = 0
+  @Field var apiBaseUrl: String = ""
+  @Field var items: [BackgroundDiscoveryItemInputRecord] = []
+  @Field var updatedAt: String = ""
+}
+
+struct BackgroundDiscoveryAnchorRecord: Record {
+  @Field var generatedAt: String = ""
+  @Field var latitude: Double = 0
+  @Field var longitude: Double = 0
+  @Field var itemSignature: String = ""
+  @Field var placeItemsSignature: String = ""
+}
+
 public class ThereYouGoLocationNotificationModule: Module {
   private let reconciler = ThereYouGoLocationNotificationReconciler.shared
 
@@ -325,6 +348,87 @@ public class ThereYouGoLocationNotificationModule: Module {
       #else
       return unavailableVisitDiagnosticResult()
       #endif
+    }
+
+    AsyncFunction("setBackgroundDiscoveryInputAsync") {
+      (record: BackgroundDiscoveryInputRecord) async in
+      let items = record.items.map { item in
+        BackgroundDiscoveryPolicy.Item(
+          id: item.id,
+          revision: item.revision,
+          text: item.text,
+          taxonomyVersion: item.taxonomyVersion,
+          categories: item.categories
+        )
+      }
+      await ThereYouGoBackgroundDiscovery.shared.replaceInput(
+        apiBaseUrl: record.apiBaseUrl,
+        items: items,
+        updatedAt: record.updatedAt
+      )
+    }
+
+    AsyncFunction("noteBackgroundDiscoveryAnchorAsync") {
+      (
+        itemSignature: String,
+        placeItemsSignature: String,
+        generatedAt: String
+      ) async in
+      await ThereYouGoBackgroundDiscovery.shared.noteAnchor(
+        itemSignature: itemSignature,
+        placeItemsSignature: placeItemsSignature,
+        generatedAt: generatedAt
+      )
+    }
+
+    AsyncFunction("getBackgroundDiscoveryAnchorAsync") {
+      () async -> BackgroundDiscoveryAnchorRecord? in
+      guard
+        let anchor = await ThereYouGoBackgroundDiscovery.shared.foregroundAnchor()
+      else {
+        return nil
+      }
+      let record = BackgroundDiscoveryAnchorRecord()
+      record.generatedAt = anchor.generatedAt
+      record.latitude = anchor.latitude
+      record.longitude = anchor.longitude
+      record.itemSignature = anchor.itemSignature
+      record.placeItemsSignature = anchor.placeItemsSignature
+      return record
+    }
+
+    AsyncFunction("getBackgroundDiscoveryEventHistoryAsync") {
+      () -> BackgroundDiscoveryDevelopmentEventHistoryRecord in
+      backgroundDiscoveryDevelopmentEventHistory()
+    }
+
+    AsyncFunction("clearBackgroundDiscoveryEventHistoryAsync") {
+      () -> BackgroundDiscoveryDevelopmentEventHistoryRecord in
+      clearBackgroundDiscoveryDevelopmentEventHistory()
+    }
+
+    AsyncFunction("debugSimulateBackgroundVisitAsync") {
+      (
+        latitude: Double,
+        longitude: Double,
+        horizontalAccuracy: Double
+      ) async throws -> String in
+      #if DEBUG
+      return await ThereYouGoBackgroundDiscovery.shared.simulateVisit(
+        latitude: latitude,
+        longitude: longitude,
+        horizontalAccuracy: horizontalAccuracy
+      )
+      #else
+      throw GenericException(
+        "Background discovery simulation is compiled into debug builds only."
+      )
+      #endif
+    }
+
+    AsyncFunction("debugValidateBackgroundDiscoveryAsync") {
+      () async -> String in
+      await ThereYouGoBackgroundDiscovery.shared.debugValidationJSON()
     }
   }
 }

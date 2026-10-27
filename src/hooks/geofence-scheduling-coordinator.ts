@@ -3,6 +3,12 @@ import type {
   NativeSyncResult,
 } from '../../modules/there-you-go-location-notification/src/ThereYouGoLocationNotificationModule';
 import type { Item } from '../models/Item';
+import {
+  backgroundDiscoveryItemSignature,
+  backgroundDiscoveryItemsFromItems,
+  backgroundDiscoveryPlaceItemsSignature,
+  isStaleSnapshotError,
+} from '../native/background-discovery';
 import { toNativeCandidateSnapshot } from '../native/geofence-native-contract';
 import {
   buildCandidateSnapshotV1,
@@ -19,6 +25,11 @@ type NativeSchedulingClient = {
   syncAsync: (
     snapshot: ReturnType<typeof toNativeCandidateSnapshot>,
   ) => Promise<NativeSyncResult>;
+  noteBackgroundDiscoveryAnchorAsync?: (
+    itemSignature: string,
+    placeItemsSignature: string,
+    generatedAt: string,
+  ) => Promise<void>;
 };
 
 export type GeofenceSchedulingInput = {
@@ -76,6 +87,40 @@ function developmentLog(
   } else {
     console.info(`[geofence] ${message}`, details);
   }
+}
+
+function snapshotMatchesClassifiedItems(
+  items: readonly Item[],
+  snapshot: CandidateSnapshotV1,
+): boolean {
+  const classified = backgroundDiscoveryItemsFromItems(items);
+  if (classified.length !== snapshot.items.length) {
+    return false;
+  }
+
+  const classifiedById = new Map(classified.map((item) => [item.id, item]));
+  const joined = snapshot.items.flatMap((item) => {
+    const source = classifiedById.get(item.id);
+    if (
+      source === undefined ||
+      source.revision !== item.revision ||
+      source.text !== item.text
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        ...source,
+        categories: item.categories,
+      },
+    ];
+  });
+  return (
+    joined.length === classified.length &&
+    backgroundDiscoveryItemSignature(joined) ===
+      backgroundDiscoveryItemSignature(classified)
+  );
 }
 
 function itemsSignature(items: readonly Item[]): string {
@@ -344,13 +389,47 @@ export class GeofenceSchedulingCoordinator {
       if (canApplyDiscovery) {
         this.lastAppliedDiscovery = discovery;
       }
+      await this.noteSnapshot(previousSnapshot);
       this.publishReadyState(this.nativeState);
       return;
     }
 
-    const result = await this.nativeClient.syncAsync(
-      toNativeCandidateSnapshot(nextSnapshot),
-    );
+    let result: NativeSyncResult;
+    try {
+      result = await this.nativeClient.syncAsync(
+        toNativeCandidateSnapshot(nextSnapshot),
+      );
+    } catch (error) {
+      if (!isStaleSnapshotError(error) || !this.isStarted) {
+        throw error;
+      }
+
+      const reloaded = await this.nativeClient.getStateAsync();
+      if (!this.isStarted) {
+        return;
+      }
+
+      this.nativeState = reloaded;
+      if (canApplyDiscovery) {
+        this.lastAppliedDiscovery = discovery;
+      }
+      const reloadedSnapshot = asCandidateSnapshot(reloaded.snapshot);
+      if (reloadedSnapshot !== null) {
+        await this.noteSnapshot(reloadedSnapshot);
+      }
+      this.publishReadyState(reloaded);
+      this.log?.('info', 'stale snapshot reloaded', {
+        generatedAt: reloaded.snapshot?.generatedAt ?? null,
+        discoveryAnchor: reloaded.snapshot?.discoveryAnchor ?? null,
+      });
+      if (
+        reloadedSnapshot !== null &&
+        this.snapshotNeedsItemCorrection(reloadedSnapshot)
+      ) {
+        this.requestReconcile();
+      }
+      return;
+    }
     if (!this.isStarted) {
       return;
     }
@@ -359,6 +438,7 @@ export class GeofenceSchedulingCoordinator {
     if (canApplyDiscovery) {
       this.lastAppliedDiscovery = discovery;
     }
+    await this.noteSnapshot(nextSnapshot);
     this.publishReadyState(result.state);
     this.log?.(result.failures.length > 0 ? 'warn' : 'info', 'sync complete', {
       scheduledPlaceIds: result.scheduledPlaceIds,
@@ -372,6 +452,39 @@ export class GeofenceSchedulingCoordinator {
       missingObservationRequirements:
         result.state.missingObservationRequirements,
     });
+  }
+
+  private snapshotNeedsItemCorrection(
+    snapshot: CandidateSnapshotV1,
+  ): boolean {
+    const sanitized = sanitizeCandidateSnapshotV1({
+      generatedAt: snapshot.generatedAt,
+      items: this.input.items,
+      snapshot,
+    });
+    return (
+      snapshotContentSignature(snapshot) !== snapshotContentSignature(sanitized)
+    );
+  }
+
+  private async noteSnapshot(snapshot: CandidateSnapshotV1): Promise<void> {
+    const note = this.nativeClient.noteBackgroundDiscoveryAnchorAsync;
+    if (note === undefined || !snapshotMatchesClassifiedItems(this.input.items, snapshot)) {
+      return;
+    }
+
+    const classified = backgroundDiscoveryItemsFromItems(this.input.items);
+    try {
+      await note(
+        backgroundDiscoveryItemSignature(classified),
+        backgroundDiscoveryPlaceItemsSignature(classified),
+        snapshot.generatedAt,
+      );
+    } catch (error) {
+      this.log?.('warn', 'discovery anchor note failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private nextGeneratedAt(

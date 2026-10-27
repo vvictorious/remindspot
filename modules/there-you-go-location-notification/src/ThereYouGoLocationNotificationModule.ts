@@ -190,6 +190,44 @@ export type ArrivalDiagnosticHistoryQuery = {
   activities: ArrivalDiagnosticActivitySample[];
 };
 
+export type BackgroundDiscoveryAnchor = {
+  generatedAt: string;
+  latitude: number;
+  longitude: number;
+  itemSignature: string;
+  placeItemsSignature: string;
+};
+
+export type BackgroundDiscoveryInput = {
+  schemaVersion: number;
+  apiBaseUrl: string;
+  items: {
+    id: string;
+    revision: number;
+    text: string;
+    taxonomyVersion: number;
+    categories: readonly string[];
+  }[];
+  updatedAt: string;
+};
+
+export type BackgroundDiscoveryDevelopmentEvent = {
+  sequence: number;
+  recordedAt: string;
+  type: string;
+  detail: string | null;
+  durationSeconds: number | null;
+  accuracyMeters: number | null;
+  distanceFromAnchorMeters: number | null;
+  storeCount: number | null;
+  storeName: string | null;
+};
+
+export type BackgroundDiscoveryDevelopmentEventHistory = {
+  droppedEventCount: number;
+  events: BackgroundDiscoveryDevelopmentEvent[];
+};
+
 export type ThereYouGoLocationNotificationModule = {
   scheduleAsync(request: LocationNotificationRequest): Promise<string>;
   getScheduledAsync(
@@ -213,6 +251,23 @@ export type ThereYouGoLocationNotificationModule = {
   stopVisitDiagnosticAsync(): Promise<string>;
   getVisitDiagnosticResultsAsync(): Promise<string>;
   clearVisitDiagnosticResultsAsync(): Promise<string>;
+  setBackgroundDiscoveryInputAsync(
+    input: BackgroundDiscoveryInput,
+  ): Promise<void>;
+  noteBackgroundDiscoveryAnchorAsync(
+    itemSignature: string,
+    placeItemsSignature: string,
+    generatedAt: string,
+  ): Promise<void>;
+  getBackgroundDiscoveryAnchorAsync(): Promise<BackgroundDiscoveryAnchor | null>;
+  getBackgroundDiscoveryEventHistoryAsync(): Promise<BackgroundDiscoveryDevelopmentEventHistory>;
+  clearBackgroundDiscoveryEventHistoryAsync(): Promise<BackgroundDiscoveryDevelopmentEventHistory>;
+  debugSimulateBackgroundVisitAsync(
+    latitude: number,
+    longitude: number,
+    horizontalAccuracy: number,
+  ): Promise<string>;
+  debugValidateBackgroundDiscoveryAsync(): Promise<string>;
 };
 
 export default requireOptionalNativeModule<ThereYouGoLocationNotificationModule>(

@@ -70,6 +70,15 @@ vi.mock('../api/places', () => ({
   findPlaceCandidates: mocks.findPlaceCandidates,
 }));
 
+vi.mock(
+  '../../modules/there-you-go-location-notification/src/ThereYouGoLocationNotificationModule',
+  () => ({
+    default: {
+      getBackgroundDiscoveryAnchorAsync: vi.fn(async () => null),
+    },
+  }),
+);
+
 type HarnessProps = {
   isLoadingItems: boolean;
   items: readonly Item[];

@@ -3,6 +3,7 @@ import * as Location from 'expo-location';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppState } from 'react-native';
 
+import ThereYouGoLocationNotification from '../../modules/there-you-go-location-notification/src/ThereYouGoLocationNotificationModule';
 import type { Item } from '../models/Item';
 import {
   INITIAL_PLACE_DISCOVERY_STATE,
@@ -54,6 +55,23 @@ export function usePlaceCandidates({
           };
         },
         onStateChange: setDiscoveryState,
+        readPersistedDiscoveryAnchor: async () => {
+          if (ThereYouGoLocationNotification === null) {
+            return null;
+          }
+
+          const anchor =
+            await ThereYouGoLocationNotification.getBackgroundDiscoveryAnchorAsync();
+          if (anchor === null) {
+            return null;
+          }
+
+          return {
+            latitude: anchor.latitude,
+            longitude: anchor.longitude,
+            placeItemsSignature: anchor.placeItemsSignature,
+          };
+        },
       }),
   );
   const [isForeground, setIsForeground] = useState(

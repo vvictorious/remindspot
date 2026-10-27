@@ -240,6 +240,17 @@ enum CandidateSnapshotValidationError: LocalizedError {
   }
 }
 
+enum SnapshotFreshnessError: LocalizedError {
+  case staleSnapshot
+
+  var errorDescription: String? {
+    switch self {
+    case .staleSnapshot:
+      return "stale-snapshot"
+    }
+  }
+}
+
 enum PersistedGeofenceStateError: LocalizedError {
   case unsupportedVersion
   case duplicatePlaceId
@@ -1044,7 +1055,7 @@ actor ThereYouGoLocationNotificationReconciler {
     _ = launchedForLocation
   }
 
-  func regionEntered(installationId: String, at enteredAt: Date) async {
+  func regionEntered(installationId: String, at enteredAt: Date) async -> Bool {
     await acquireOperation()
     defer { releaseOperation() }
     let loaded: PersistedGeofenceState
@@ -1059,7 +1070,7 @@ actor ThereYouGoLocationNotificationReconciler {
         detail: "state-unreadable installation=\(installationId)"
       )
       #endif
-      return
+      return false
     }
 
     do {
@@ -1077,11 +1088,12 @@ actor ThereYouGoLocationNotificationReconciler {
           detail: "unmatched installation=\(installationId)"
         )
         #endif
-        return
+        return false
       }
       #if DEBUG
       let beforeEntry = state
       #endif
+      let countBefore = state.observations.count
       state = SmartArrivalStateTransitions.regionEntered(
         placeId: request.placeId,
         registrationId: installationId,
@@ -1098,6 +1110,7 @@ actor ThereYouGoLocationNotificationReconciler {
         state,
         observationEligible: eligibility.canObserve
       )
+      let started = state.observations.count > countBefore
       #if DEBUG
       let proposedEntry = state
       try saveStateRecordingDevelopmentEvents(&state) {
@@ -1118,8 +1131,9 @@ actor ThereYouGoLocationNotificationReconciler {
       #else
       try saveState(&state)
       #endif
+      return started
     } catch {
-      return
+      return false
     }
   }
 
@@ -1405,15 +1419,10 @@ actor ThereYouGoLocationNotificationReconciler {
       )
     }
 
-    if generatedAt < previousGeneratedAt {
-      throw CandidateSnapshotValidationError.invalid(
-        "generatedAt is older than the persisted snapshot."
-      )
-    }
-    if generatedAt == previousGeneratedAt && snapshot != previous {
-      throw CandidateSnapshotValidationError.invalid(
-        "generatedAt conflicts with the persisted snapshot."
-      )
+    if generatedAt < previousGeneratedAt ||
+      (generatedAt == previousGeneratedAt && snapshot != previous)
+    {
+      throw SnapshotFreshnessError.staleSnapshot
     }
   }
 

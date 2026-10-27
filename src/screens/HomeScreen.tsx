@@ -14,6 +14,7 @@ import {
 import { ItemInput } from '../components/ItemInput';
 import { ItemRow } from '../components/ItemRow';
 import { useGeofenceScheduling } from '../hooks/useGeofenceScheduling';
+import { useBackgroundDiscoveryInput } from '../hooks/useBackgroundDiscoveryInput';
 import { useItemClassification } from '../hooks/useItemClassification';
 import { useItems } from '../hooks/useItems';
 import { usePlaceCandidates } from '../hooks/usePlaceCandidates';
@@ -96,6 +97,10 @@ export function HomeScreen() {
     markClassificationFailed,
   });
 
+  useBackgroundDiscoveryInput({
+    isHydrated: !isLoading,
+    items,
+  });
   const placeCandidates = usePlaceCandidates({
     isLoadingItems: isLoading,
     items,

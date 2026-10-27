@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  backgroundDiscoveryPlaceItemsSignature,
+} from '../native/background-discovery';
 import type { PlaceCandidatesResponse } from '../api/places';
 import { DESTINATION_TAXONOMY_VERSION } from '../models/Classification';
 import {
@@ -55,6 +58,11 @@ describe('PlaceDiscoveryCoordinator', () => {
       },
       options?: { signal?: AbortSignal },
     ) => Promise<PlaceCandidatesResponse>;
+    readPersistedDiscoveryAnchor?: () => Promise<{
+      latitude: number;
+      longitude: number;
+      placeItemsSignature: string;
+    } | null>;
   }) {
     const states: PlaceDiscoveryState[] = [];
     const locations = options?.locations ?? [
@@ -73,6 +81,7 @@ describe('PlaceDiscoveryCoordinator', () => {
     const coordinator = new PlaceDiscoveryCoordinator({
       getLocation,
       discover,
+      readPersistedDiscoveryAnchor: options?.readPersistedDiscoveryAnchor,
       onStateChange: (state) => states.push(state),
     });
 
@@ -627,5 +636,45 @@ describe('PlaceDiscoveryCoordinator', () => {
         partialEnvelope,
       );
     });
+  });
+
+  it('skips a foreground search when background discovery already has a nearby anchor', async () => {
+    const placeItemsSignature =
+      backgroundDiscoveryPlaceItemsSignature([groceryItem]);
+    const nearby = createHarness({
+      locations: [{ latitude: 34.0274, longitude: -118.393 }],
+      readPersistedDiscoveryAnchor: async () => ({
+        latitude: 34.027,
+        longitude: -118.393,
+        placeItemsSignature,
+      }),
+    });
+    nearby.update([groceryItem]);
+    await advance();
+    expect(nearby.discover).not.toHaveBeenCalled();
+
+    const distant = createHarness({
+      locations: [{ latitude: 34.047, longitude: -118.393 }],
+      readPersistedDiscoveryAnchor: async () => ({
+        latitude: 34.027,
+        longitude: -118.393,
+        placeItemsSignature,
+      }),
+    });
+    distant.update([groceryItem]);
+    await advance();
+    expect(distant.discover).toHaveBeenCalledOnce();
+
+    const changedItems = createHarness({
+      locations: [{ latitude: 34.0274, longitude: -118.393 }],
+      readPersistedDiscoveryAnchor: async () => ({
+        latitude: 34.027,
+        longitude: -118.393,
+        placeItemsSignature: 'different-items',
+      }),
+    });
+    changedItems.update([groceryItem]);
+    await advance();
+    expect(changedItems.discover).toHaveBeenCalledOnce();
   });
 });

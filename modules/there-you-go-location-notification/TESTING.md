@@ -458,3 +458,38 @@ from **Always** back to **While Using the App** to restore the original
 permission level. Keep Precise Location enabled for the existing production
 notification behavior. Turn off **Privacy & Security > Motion & Fitness >
 ThereYouGo** if it was granted only for this diagnostic.
+
+## Background discovery on a physical iPhone
+
+Background discovery starts `CLVisit` monitoring during launch when saved
+classified items exist and the phone already has Always and Precise location.
+It does not request a new permission. The Mac must be running the NestJS
+server on the same Wi-Fi, and `EXPO_PUBLIC_API_BASE_URL` must be that Mac's
+LAN address. A successful Metro simulation does not measure how long iOS will
+keep the process awake for a real visit.
+
+1. Launch the dev build once with items classified, then force-quit and
+   relaunch. In the Metro console, `tygBackgroundDiscovery.history()` should
+   include `monitoring-started` with `origin=launch` or
+   `origin=launch-location`. With no classified items, the event is
+   `monitoring-not-started`.
+2. `await tygBackgroundDiscovery.validate()` runs the native eligibility,
+   response-gating, and already-nearby checks. `passed` should be true.
+3. With the server running, simulate a visit at the phone's current
+   coordinate:
+   `await tygBackgroundDiscovery.simulate(latitude, longitude, 30)`.
+   The history should show `discovery-started`, `reconciliation-applied`, and
+   any `observation-started` events. Smart Arrival history may show
+   `region-entry`. It must not show `notification-succeeded` from the visit
+   coordinate alone.
+4. Simulate the same coordinate again. The second call should skip with
+   `unchanged-nearby-anchor` and the server should not log another Places
+   request.
+5. Stop the server and simulate a coordinate at least 1.2 km away. The
+   previous `getStateAsync()` snapshot should remain.
+6. The debug visit recorder is unchanged. `tygVisitDiagnostic.start()` still
+   records visits and does not discover stores or notify.
+
+`CLVisit` is not delivered in the Simulator. An away-from-home, backgrounded,
+or force-quit field test waits until the phone can reach the backend without
+a tunnel.

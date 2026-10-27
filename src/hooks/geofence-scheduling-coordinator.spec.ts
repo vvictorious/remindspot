@@ -118,7 +118,7 @@ function storedSnapshot(items: readonly Item[]): NativeCandidateSnapshot {
 }
 
 async function settle() {
-  for (let index = 0; index < 12; index += 1) {
+  for (let index = 0; index < 24; index += 1) {
     await Promise.resolve();
   }
 }
@@ -511,5 +511,84 @@ describe('GeofenceSchedulingCoordinator', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('reloads native state after a stale snapshot and does not apply that snapshot again', async () => {
+    const milk = classifiedItem('milk', 'Milk');
+    const committed = discovery([milk]);
+    const visitSnapshot = {
+      ...storedSnapshot([milk]),
+      generatedAt: '2026-10-14T18:05:00.000Z',
+      discoveryAnchor: { latitude: 33.99924, longitude: -118.46298 },
+    };
+    const harness = createHarness(nativeState(visitSnapshot));
+    harness.getStateAsync.mockResolvedValue(nativeState(visitSnapshot));
+    harness.syncAsync.mockRejectedValue(new Error('stale-snapshot'));
+
+    harness.coordinator.start();
+    harness.coordinator.update({
+      items: [milk],
+      isHydrated: true,
+      committedDiscovery: committed,
+    });
+    await settle();
+
+    expect(harness.syncAsync).toHaveBeenCalledOnce();
+    expect(harness.syncAsync.mock.calls[0][0].discoveryAnchor).toEqual(ANCHOR);
+    expect(harness.log).toHaveBeenCalledWith(
+      'info',
+      'stale snapshot reloaded',
+      expect.objectContaining({
+        generatedAt: visitSnapshot.generatedAt,
+        discoveryAnchor: visitSnapshot.discoveryAnchor,
+      }),
+    );
+
+    harness.coordinator.update({
+      items: [milk],
+      isHydrated: true,
+      committedDiscovery: committed,
+    });
+    harness.coordinator.resume();
+    await settle();
+
+    expect(harness.syncAsync).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles again when a stale snapshot still contains removed items', async () => {
+    const milk = classifiedItem('milk', 'Milk');
+    const bread = classifiedItem('bread', 'Bread');
+    const visitSnapshot = storedSnapshot([milk, bread]);
+    let attempts = 0;
+    const harness = createHarness(nativeState(visitSnapshot), async (snapshot) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error('stale-snapshot');
+      }
+      return syncResult(snapshot);
+    });
+
+    harness.coordinator.start();
+    harness.coordinator.update({
+      items: [bread],
+      isHydrated: true,
+      committedDiscovery: null,
+    });
+    await settle();
+
+    expect(harness.syncAsync).toHaveBeenCalledTimes(2);
+    expect(harness.syncAsync.mock.calls[1][0].items).toEqual([
+      expect.objectContaining({ id: 'bread', revision: 1 }),
+    ]);
+    expect(harness.syncAsync.mock.calls[1][0].stores[0].itemIds).toEqual([
+      'bread',
+    ]);
+    expect(harness.log).toHaveBeenCalledWith(
+      'info',
+      'stale snapshot reloaded',
+      expect.objectContaining({
+        generatedAt: visitSnapshot.generatedAt,
+      }),
+    );
   });
 });

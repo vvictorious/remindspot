@@ -4,6 +4,9 @@ import {
   type PlaceCandidatesResponse,
   type PlaceStore,
 } from '../api/places';
+import {
+  backgroundDiscoveryPlaceItemsSignature,
+} from '../native/background-discovery';
 import type { DestinationCategory } from '../models/Classification';
 import type { PlaceRequestItem } from './place-item-projection';
 
@@ -46,10 +49,17 @@ export type PlaceDiscoveryCoordinatorInput = {
 
 type Discover = typeof findPlaceCandidates;
 
+export type PersistedDiscoveryAnchor = {
+  latitude: number;
+  longitude: number;
+  placeItemsSignature: string;
+};
+
 export type PlaceDiscoveryCoordinatorDependencies = {
   getLocation: () => Promise<Location | null>;
   onStateChange: (state: PlaceDiscoveryState) => void;
   discover?: Discover;
+  readPersistedDiscoveryAnchor?: () => Promise<PersistedDiscoveryAnchor | null>;
   setTimer?: (callback: () => void, delayMs: number) => TimerHandle;
   clearTimer?: (timer: TimerHandle) => void;
 };
@@ -180,6 +190,9 @@ function commitDiscoveryEnvelope(
 export class PlaceDiscoveryCoordinator {
   private readonly getLocation: () => Promise<Location | null>;
   private readonly discover: Discover;
+  private readonly readPersistedDiscoveryAnchor:
+    | (() => Promise<PersistedDiscoveryAnchor | null>)
+    | undefined;
   private readonly setTimer: (
     callback: () => void,
     delayMs: number,
@@ -203,6 +216,8 @@ export class PlaceDiscoveryCoordinator {
   constructor(dependencies: PlaceDiscoveryCoordinatorDependencies) {
     this.getLocation = dependencies.getLocation;
     this.discover = dependencies.discover ?? findPlaceCandidates;
+    this.readPersistedDiscoveryAnchor =
+      dependencies.readPersistedDiscoveryAnchor;
     this.setTimer =
       dependencies.setTimer ??
       ((callback, delayMs) => setTimeout(callback, delayMs));
@@ -326,6 +341,29 @@ export class PlaceDiscoveryCoordinator {
         latitude: location.latitude,
         longitude: location.longitude,
       });
+      if (!force) {
+        const persistedAnchor = await this.readPersistedAnchor();
+        if (!this.isCurrent(generation, requestItemsSignature)) {
+          return;
+        }
+        if (
+          persistedAnchor !== null &&
+          persistedAnchor.placeItemsSignature ===
+            backgroundDiscoveryPlaceItemsSignature(requestItems) &&
+          distanceInMeters(persistedAnchor, anchor) <
+            PLACE_DISCOVERY_MOVEMENT_THRESHOLD_METERS
+        ) {
+          this.previousRequest = {
+            itemsSignature: requestItemsSignature,
+            location: {
+              latitude: persistedAnchor.latitude,
+              longitude: persistedAnchor.longitude,
+            },
+            locationIdentity: locationIdentity(persistedAnchor),
+          };
+          return;
+        }
+      }
       const previous = this.previousRequest;
       const reusesLocationIdentity =
         previous !== null &&
@@ -382,6 +420,18 @@ export class PlaceDiscoveryCoordinator {
       if (this.inFlight === requestController) {
         this.inFlight = null;
       }
+    }
+  }
+
+  private async readPersistedAnchor(): Promise<PersistedDiscoveryAnchor | null> {
+    if (this.readPersistedDiscoveryAnchor === undefined) {
+      return null;
+    }
+
+    try {
+      return await this.readPersistedDiscoveryAnchor();
+    } catch {
+      return null;
     }
   }
 

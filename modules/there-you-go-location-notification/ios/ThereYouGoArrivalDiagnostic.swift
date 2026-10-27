@@ -2512,19 +2512,22 @@ final class ThereYouGoArrivalDiagnostic:
 public class ThereYouGoArrivalDiagnosticAppDelegateSubscriber:
   ExpoAppDelegateSubscriber
 {
-  #if DEBUG
-  // iOS delivers a pending visit after didFinishLaunching returns, and only
-  // if a delegate already exists. This runs before React Native starts.
-  // The didFinishLaunching call below is the fallback, still before return.
   public func application(
     _ application: UIApplication,
     willFinishLaunchingWithOptions launchOptions:
       [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    #if DEBUG
     ThereYouGoVisitDiagnostic.shared.handleLaunch(launchOptions: launchOptions)
+    #endif
+    ThereYouGoSmartArrivalRuntime.shared.prepareVisitMonitoring(
+      launchOptions: launchOptions
+    )
+    ThereYouGoSmartArrivalRuntime.shared.handleLaunch(
+      launchedForLocation: launchOptions?[.location] != nil
+    )
     return true
   }
-  #endif
 
   public func application(
     _ application: UIApplication,
@@ -2534,10 +2537,13 @@ public class ThereYouGoArrivalDiagnosticAppDelegateSubscriber:
     #if DEBUG
     ThereYouGoVisitDiagnostic.shared.handleLaunch(launchOptions: launchOptions)
     #endif
-    ThereYouGoArrivalDiagnostic.shared.handleLaunch(
-      launchedForLocation: launchOptions?[.location] != nil
+    ThereYouGoSmartArrivalRuntime.shared.prepareVisitMonitoring(
+      launchOptions: launchOptions
     )
     ThereYouGoSmartArrivalRuntime.shared.handleLaunch(
+      launchedForLocation: launchOptions?[.location] != nil
+    )
+    ThereYouGoArrivalDiagnostic.shared.handleLaunch(
       launchedForLocation: launchOptions?[.location] != nil
     )
     return true

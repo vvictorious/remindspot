@@ -42,6 +42,12 @@ private final class SmartArrivalModernRuntime {
   var liveUpdatesTask: Task<Void, Never>?
 }
 
+struct VisitMonitoringUpdate {
+  var isMonitoring: Bool
+  var changed: Bool
+  var reason: String
+}
+
 @MainActor
 final class ThereYouGoSmartArrivalRuntime:
   NSObject, @preconcurrency CLLocationManagerDelegate
@@ -62,6 +68,10 @@ final class ThereYouGoSmartArrivalRuntime:
   private var historicalMotionTask: Task<Void, Never>?
   private var foregroundPermissionTask: Task<Void, Never>?
   private var monitoringFailures: [String: String] = [:]
+  private var didPrepareVisitMonitoring = false
+  private var didRecoverOnLaunch = false
+  private var visitMonitoringDesired = false
+  private var visitMonitoringActive = false
 
   private override init() {
     super.init()
@@ -175,12 +185,63 @@ final class ThereYouGoSmartArrivalRuntime:
 
   func handleLaunch(launchedForLocation: Bool) {
     ensureLocationManager()
+    guard !didRecoverOnLaunch else {
+      return
+    }
+    didRecoverOnLaunch = true
     Task {
       await ThereYouGoLocationNotificationReconciler.shared.recoverOnLaunch(
         launchedForLocation: launchedForLocation
       )
       await syncToPersistedObservations(reconstructed: true)
     }
+  }
+
+  func prepareVisitMonitoring(
+    launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) {
+    ensureLocationManager()
+    guard !didPrepareVisitMonitoring else {
+      return
+    }
+    didPrepareVisitMonitoring = true
+    let launchedForLocation = launchOptions?[.location] != nil
+    ThereYouGoBackgroundDiscovery.shared.prepareMonitoring(
+      origin: launchedForLocation ? "launch-location" : "launch"
+    )
+  }
+
+  func setVisitMonitoringDesired(_ desired: Bool) -> VisitMonitoringUpdate {
+    visitMonitoringDesired = desired
+    ensureLocationManager()
+    let enabled = desired && hasAlwaysPreciseAuthorization
+    if enabled {
+      locationManager?.startMonitoringVisits()
+    } else {
+      locationManager?.stopMonitoringVisits()
+    }
+    let changed = visitMonitoringActive != enabled
+    visitMonitoringActive = enabled
+    let reason =
+      enabled ? "monitoring" : (desired ? "authorization" : "no-items")
+    return VisitMonitoringUpdate(
+      isMonitoring: enabled,
+      changed: changed,
+      reason: reason
+    )
+  }
+
+  func locationAuthorization() -> (
+    alwaysPrecise: Bool,
+    status: String,
+    accuracy: String
+  ) {
+    ensureLocationManager()
+    return (
+      hasAlwaysPreciseAuthorization,
+      authorizationStatusName(locationManager?.authorizationStatus ?? .notDetermined),
+      accuracyAuthorizationName(locationManager?.accuracyAuthorization)
+    )
   }
 
   func handleDidBecomeActive() {
@@ -312,8 +373,29 @@ final class ThereYouGoSmartArrivalRuntime:
 
   func locationManager(
     _ manager: CLLocationManager,
+    didVisit visit: CLVisit
+  ) {
+    let coordinate = visit.coordinate
+    ThereYouGoBackgroundDiscovery.shared.handleVisit(
+      BackgroundDiscoveryVisitSample(
+        arrivalDate: visit.arrivalDate == Date.distantPast ? nil : visit.arrivalDate,
+        departureDate: visit.departureDate == Date.distantFuture
+          ? nil
+          : visit.departureDate,
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+        horizontalAccuracy: visit.horizontalAccuracy,
+        coordinateValid: CLLocationCoordinate2DIsValid(coordinate)
+      ),
+      allowForeground: false
+    )
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager,
     didChangeAuthorization status: CLAuthorizationStatus
   ) {
+    ThereYouGoBackgroundDiscovery.shared.refreshVisitMonitoring(origin: "authorization")
     Task {
       await ThereYouGoLocationNotificationReconciler.shared
         .recoverPersistedArrivals()
@@ -322,6 +404,7 @@ final class ThereYouGoSmartArrivalRuntime:
   }
 
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    ThereYouGoBackgroundDiscovery.shared.refreshVisitMonitoring(origin: "authorization")
     Task {
       await ThereYouGoLocationNotificationReconciler.shared
         .recoverPersistedArrivals()
@@ -790,6 +873,40 @@ final class ThereYouGoSmartArrivalRuntime:
         < SmartArrivalRuntimeConstants.regionRadiusToleranceMeters &&
       region.notifyOnEntry &&
       !region.notifyOnExit
+  }
+
+  private func authorizationStatusName(
+    _ status: CLAuthorizationStatus
+  ) -> String {
+    switch status {
+    case .notDetermined:
+      return "not-determined"
+    case .restricted:
+      return "restricted"
+    case .denied:
+      return "denied"
+    case .authorizedAlways:
+      return "always"
+    case .authorizedWhenInUse:
+      return "when-in-use"
+    @unknown default:
+      return "unknown"
+    }
+  }
+
+  private func accuracyAuthorizationName(
+    _ authorization: CLAccuracyAuthorization?
+  ) -> String {
+    switch authorization {
+    case .fullAccuracy:
+      return "full"
+    case .reducedAccuracy:
+      return "reduced"
+    case nil:
+      return "unknown"
+    @unknown default:
+      return "unknown"
+    }
   }
 
   private func isManagedIdentifier(_ identifier: String) -> Bool {

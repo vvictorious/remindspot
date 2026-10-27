@@ -2,6 +2,7 @@ import { registerRootComponent } from 'expo';
 
 import App from './App';
 import './src/diagnostics/arrival-diagnostic-console';
+import './src/diagnostics/background-discovery-console';
 import './src/diagnostics/smart-arrival-event-console';
 import './src/diagnostics/visit-diagnostic-console';
 
