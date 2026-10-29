@@ -78,6 +78,11 @@ type PreviousRequest = {
   locationIdentity: string;
 };
 
+type InFlightAttempt = {
+  controller: AbortController;
+  locationIdentity: string;
+};
+
 export const INITIAL_PLACE_DISCOVERY_STATE: PlaceDiscoveryState = {
   status: 'idle',
   stores: [],
@@ -211,6 +216,7 @@ export class PlaceDiscoveryCoordinator {
   private generation = 0;
   private timer: TimerHandle | null = null;
   private inFlight: AbortController | null = null;
+  private inFlightAttempt: InFlightAttempt | null = null;
   private previousRequest: PreviousRequest | null = null;
 
   constructor(dependencies: PlaceDiscoveryCoordinatorDependencies) {
@@ -324,6 +330,7 @@ export class PlaceDiscoveryCoordinator {
     const requestItems = copyRequestItems(this.input.items);
     const requestItemsSignature = itemsSignature(requestItems);
     let requestController: AbortController | null = null;
+    let attemptRequest: PreviousRequest | null = null;
 
     try {
       const location = await this.getLocation();
@@ -386,10 +393,14 @@ export class PlaceDiscoveryCoordinator {
         requestItems,
       };
       requestController = new AbortController();
-      this.inFlight = requestController;
-      this.previousRequest = {
+      attemptRequest = {
         itemsSignature: requestItemsSignature,
         location: anchor,
+        locationIdentity: currentLocationIdentity,
+      };
+      this.inFlight = requestController;
+      this.inFlightAttempt = {
+        controller: requestController,
         locationIdentity: currentLocationIdentity,
       };
       this.setState({
@@ -407,6 +418,7 @@ export class PlaceDiscoveryCoordinator {
         return;
       }
 
+      this.previousRequest = attemptRequest;
       this.applyResponse(snapshot, response);
     } catch (error) {
       if (
@@ -415,10 +427,22 @@ export class PlaceDiscoveryCoordinator {
       ) {
         return;
       }
+      if (
+        requestController !== null &&
+        this.inFlightAttempt?.controller !== requestController
+      ) {
+        return;
+      }
+      if (attemptRequest !== null) {
+        this.previousRequest = attemptRequest;
+      }
       this.setTransportError(toError(error));
     } finally {
       if (this.inFlight === requestController) {
         this.inFlight = null;
+      }
+      if (this.inFlightAttempt?.controller === requestController) {
+        this.inFlightAttempt = null;
       }
     }
   }
@@ -450,7 +474,8 @@ export class PlaceDiscoveryCoordinator {
     return (
       !controller.signal.aborted &&
       this.isCurrent(snapshot.generation, snapshot.itemsSignature) &&
-      this.previousRequest?.locationIdentity === snapshot.locationIdentity
+      this.inFlightAttempt?.controller === controller &&
+      this.inFlightAttempt.locationIdentity === snapshot.locationIdentity
     );
   }
 

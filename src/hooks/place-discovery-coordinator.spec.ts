@@ -165,6 +165,45 @@ describe('PlaceDiscoveryCoordinator', () => {
     expect(harness.discover).toHaveBeenCalledTimes(2);
   });
 
+  it('searches again at the same coordinates after leaving the foreground mid-request', async () => {
+    let resolveFirst: ((value: PlaceCandidatesResponse) => void) | undefined;
+    const first = new Promise<PlaceCandidatesResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = deferred<PlaceCandidatesResponse>();
+    const discover = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second.promise);
+    const harness = createHarness({ discover });
+    const location = { latitude: 34.027, longitude: -118.393 };
+
+    harness.update([groceryItem]);
+    await advance();
+    expect(discover).toHaveBeenCalledOnce();
+    expect(discover.mock.calls[0][0].location).toEqual(location);
+
+    harness.update([groceryItem], { isForeground: false });
+    expect(harness.states.at(-1)?.status).toBe('idle');
+    harness.update([groceryItem], { isForeground: true });
+    await advance();
+
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(discover.mock.calls[1][0].location).toEqual(location);
+    expect(harness.states.at(-1)?.status).toBe('loading');
+
+    resolveFirst?.(completeResponse);
+    await Promise.resolve();
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(harness.states.at(-1)?.status).toBe('loading');
+    expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
+
+    second.resolve(completeResponse);
+    await Promise.resolve();
+    expect(harness.states.at(-1)?.status).toBe('complete');
+    expect(harness.states.at(-1)?.committedDiscovery?.anchor).toEqual(location);
+  });
+
   it.each([
     ['an edit', [{ ...groceryItem, revision: 2 }]],
     ['a deletion', []],
@@ -548,9 +587,12 @@ describe('PlaceDiscoveryCoordinator', () => {
 
     it('does not commit an envelope when the app backgrounds during discovery', async () => {
       const pending = deferred<PlaceCandidatesResponse>();
-      const harness = createHarness({
-        discover: async () => pending.promise,
-      });
+      const resumed = deferred<PlaceCandidatesResponse>();
+      const discover = vi
+        .fn()
+        .mockReturnValueOnce(pending.promise)
+        .mockReturnValueOnce(resumed.promise);
+      const harness = createHarness({ discover });
 
       harness.update([groceryItem]);
       await advance();
@@ -570,8 +612,18 @@ describe('PlaceDiscoveryCoordinator', () => {
 
       harness.update([groceryItem], { isForeground: true });
       await advance();
-      expect(harness.discover).toHaveBeenCalledOnce();
+      expect(discover).toHaveBeenCalledTimes(2);
       expect(harness.states.at(-1)?.committedDiscovery).toBeNull();
+
+      resumed.resolve({
+        status: 'complete',
+        stores: [market],
+        categoryFailures: [],
+      });
+      await settle();
+      expect(harness.states.at(-1)?.committedDiscovery?.response.stores).toEqual(
+        [market],
+      );
     });
 
     it('commits partial discovery separately and replaces that envelope atomically', async () => {
