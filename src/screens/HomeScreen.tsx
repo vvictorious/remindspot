@@ -118,7 +118,7 @@ export function HomeScreen() {
         style={styles.keyboardView}
       >
         <View style={styles.header}>
-          <Text style={styles.eyebrow}>THERE YOU GO</Text>
+          <Text style={styles.eyebrow}>REMINDSPOT</Text>
           <Text style={styles.title}>Don’t forget it.</Text>
           <Text style={styles.subtitle}>
             Keep a simple list for the next time you’re out.

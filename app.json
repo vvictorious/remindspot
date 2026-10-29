@@ -1,20 +1,20 @@
 {
   "expo": {
-    "name": "ThereYouGo",
-    "slug": "there-you-go",
+    "name": "Remindspot",
+    "slug": "remindspot",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.there-you-go",
+      "bundleIdentifier": "com.victormejia.remindspot",
       "appleTeamId": "4RN9YDZ3N3",
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         },
-        "NSLocalNetworkUsageDescription": "Allow ThereYouGo to connect to the development server on your local network."
+        "NSLocalNetworkUsageDescription": "Allow Remindspot to connect to the development server on your local network."
       }
     },
     "android": {
@@ -33,11 +33,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow ThereYouGo to use your location to notify you when you arrive at a relevant place.",
-          "locationAlwaysAndWhenInUsePermission": "Allow ThereYouGo to detect when you arrive at a relevant store, even when the app is in the background.",
-          "locationAlwaysPermission": "Allow ThereYouGo to detect when you arrive at a relevant store, even when the app is in the background.",
+          "locationWhenInUsePermission": "Allow Remindspot to use your location to notify you when you arrive at a relevant place.",
+          "locationAlwaysAndWhenInUsePermission": "Allow Remindspot to detect when you arrive at a relevant store, even when the app is in the background.",
+          "locationAlwaysPermission": "Allow Remindspot to detect when you arrive at a relevant store, even when the app is in the background.",
           "isIosBackgroundLocationEnabled": true,
-          "motionUsagePermission": "Allow ThereYouGo to use motion activity to confirm that you have arrived at a store on foot."
+          "motionUsagePermission": "Allow Remindspot to use motion activity to confirm that you have arrived at a store on foot."
         }
       ],
       [

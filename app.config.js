@@ -3,9 +3,9 @@ const ARRIVAL_DIAGNOSTIC_ENABLED =
 const DEFAULT_ALWAYS_PERMISSION =
   'Allow $(PRODUCT_NAME) to access your location';
 const DIAGNOSTIC_ALWAYS_PERMISSION =
-  'Allow ThereYouGo to collect brief location samples after entering one test store for an arrival-timing diagnostic.';
+  'Allow Remindspot to collect brief location samples after entering one test store for an arrival-timing diagnostic.';
 const DIAGNOSTIC_MOTION_PERMISSION =
-  'Allow ThereYouGo to record brief motion-activity classifications during one test-store arrival diagnostic.';
+  'Allow Remindspot to record brief motion-activity classifications during one test-store arrival diagnostic.';
 
 module.exports = ({ config }) => ({
   ...config,
