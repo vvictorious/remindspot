@@ -17,6 +17,10 @@ import {
   GEMINI_CLASSIFICATION_MIN_RETRY_BUDGET_MS,
   GEMINI_CLASSIFICATION_MODEL,
 } from './gemini-classification-config';
+import {
+  geminiErrorDiagnostics,
+  type GeminiErrorDiagnostics,
+} from './gemini-classification-error';
 import { GEMINI_CLASSIFICATION_PROMPT_V3 } from './gemini-classification-prompt';
 import { GEMINI_CLASSIFICATION_SCHEMA } from './gemini-classification-schema';
 
@@ -107,7 +111,7 @@ type GeminiClassificationFailureDetails = {
   failureReason: 'invalid-response' | 'provider-request';
   sdkErrorType?: string;
   sdkStatus?: number;
-};
+} & GeminiErrorDiagnostics;
 
 const failureDetails = new WeakMap<
   object,
@@ -151,6 +155,7 @@ function providerFailureDetails(
 ): GeminiClassificationFailureDetails {
   const details: GeminiClassificationFailureDetails = {
     failureReason: 'provider-request',
+    ...geminiErrorDiagnostics(error),
   };
   const errorType = sdkErrorType(error);
   const status = sdkStatus(error);

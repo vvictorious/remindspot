@@ -342,7 +342,7 @@ describe('GeminiClassificationProvider', () => {
     }
   });
 
-  it('logs the SDK status for a provider request failure', async () => {
+  it('logs the SDK HTTP status without an unstructured error message', async () => {
     const secretMessage = 'secret sdk message with response body';
     const sdkError = new Error(secretMessage);
     sdkError.name = 'ApiError';
@@ -372,6 +372,156 @@ describe('GeminiClassificationProvider', () => {
       });
       expect(JSON.stringify(errorLog.mock.calls)).not.toContain(secretMessage);
       expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Milk');
+      expect(errorLog.mock.calls[0]?.[0]).not.toHaveProperty('upstreamMessage');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('logs allowlisted Gemini diagnostics without the raw error body', async () => {
+    const itemText = 'Wheat bread';
+    const apiKey = 'test-api-key';
+    const body = {
+      error: {
+        code: 400,
+        message: 'Request contains an invalid argument.',
+        status: 'INVALID_ARGUMENT',
+        details: [
+          {
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            reason: 'API_KEY_INVALID',
+            domain: 'googleapis.com',
+            metadata: { requestEcho: itemText, apiKey },
+          },
+          {
+            '@type': 'type.googleapis.com/google.rpc.BadRequest',
+            fieldViolations: [
+              {
+                field: 'generationConfig.responseJsonSchema',
+                description: 'Unknown name "additionalProperties".',
+                extra: itemText,
+              },
+            ],
+          },
+          {
+            '@type': 'type.googleapis.com/google.rpc.DebugInfo',
+            detail: `UNALLOWLISTED ${itemText}`,
+            stackEntries: [apiKey],
+          },
+        ],
+      },
+    };
+    const rawBody = JSON.stringify(body);
+    const sdkError = new Error(rawBody);
+    sdkError.name = 'ApiError';
+    Object.assign(sdkError, { status: 400 });
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockRejectedValue(sdkError);
+
+    try {
+      await expect(createProvider(apiKey).classify(itemText)).rejects.toEqual(
+        new UnprocessableEntityException(
+          'Classification provider request failed',
+        ),
+      );
+
+      expect(sdk.generateContent).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 422,
+        errorType: 'UnprocessableEntityException',
+        durationMs: expect.any(Number) as unknown,
+        failureReason: 'provider-request',
+        sdkErrorType: 'ApiError',
+        sdkStatus: 400,
+        upstreamStatus: 'INVALID_ARGUMENT',
+        upstreamReason: 'API_KEY_INVALID',
+        fieldViolations: [{ field: 'generationConfig.responseJsonSchema' }],
+      });
+      const logged = JSON.stringify(errorLog.mock.calls);
+      expect(logged).not.toContain(rawBody);
+      expect(logged).not.toContain(itemText);
+      expect(logged).not.toContain(apiKey);
+      expect(logged).not.toContain('Request contains an invalid argument.');
+      expect(logged).not.toContain('Unknown name');
+      expect(logged).not.toContain('additionalProperties');
+      expect(logged).not.toContain('UNALLOWLISTED');
+      expect(logged).not.toContain('stackEntries');
+      expect(logged).not.toContain('metadata');
+      expect(logged).not.toContain('@type');
+      expect(errorLog.mock.calls[0]?.[0]).not.toHaveProperty('upstreamMessage');
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it('omits item fragments, upstream messages, descriptions, and credentials', async () => {
+    const itemText = 'Chia seeds';
+    const apiKey = 'AIzaSyTESTKEY1234567890abcdEFGH';
+    const bearerToken = 'field-test-bearer-token';
+    const body = {
+      error: {
+        code: 400,
+        message: `Invalid contents: ${itemText}. Authorization: Bearer ${bearerToken}`,
+        status: 'INVALID_ARGUMENT',
+        details: [
+          {
+            '@type': 'type.googleapis.com/google.rpc.BadRequest',
+            fieldViolations: [
+              {
+                field: 'contents[0].parts[0].text',
+                description: `Rejected ${itemText} key=${apiKey}`,
+              },
+            ],
+          },
+          {
+            '@type': 'type.googleapis.com/google.rpc.DebugInfo',
+            detail: `${itemText} ${apiKey} Bearer ${bearerToken}`,
+          },
+        ],
+      },
+    };
+    const sdkError = new Error(JSON.stringify(body));
+    sdkError.name = 'ApiError';
+    Object.assign(sdkError, { status: 400 });
+    const errorLog = vi
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    sdk.generateContent.mockRejectedValue(sdkError);
+
+    try {
+      await expect(createProvider(apiKey).classify(itemText)).rejects.toEqual(
+        new UnprocessableEntityException(
+          'Classification provider request failed',
+        ),
+      );
+
+      expect(sdk.generateContent).toHaveBeenCalledOnce();
+      expect(errorLog.mock.calls[0]?.[0]).toEqual({
+        event: 'gemini_classification.failed',
+        statusCode: 422,
+        errorType: 'UnprocessableEntityException',
+        durationMs: expect.any(Number) as unknown,
+        failureReason: 'provider-request',
+        sdkErrorType: 'ApiError',
+        sdkStatus: 400,
+        upstreamStatus: 'INVALID_ARGUMENT',
+        fieldViolations: [{ field: 'contents[0].parts[0].text' }],
+      });
+      const logged = JSON.stringify(errorLog.mock.calls);
+      expect(logged).not.toContain(itemText);
+      expect(logged).not.toContain('chia');
+      expect(logged).not.toContain('Chia');
+      expect(logged).not.toContain('seeds');
+      expect(logged).not.toContain(apiKey);
+      expect(logged).not.toContain(bearerToken);
+      expect(logged).not.toContain('Bearer');
+      expect(logged).not.toContain('Invalid contents');
+      expect(logged).not.toContain('Rejected');
+      expect(logged).not.toContain('DebugInfo');
+      expect(errorLog.mock.calls[0]?.[0]).not.toHaveProperty('upstreamMessage');
     } finally {
       errorLog.mockRestore();
     }
