@@ -4,9 +4,9 @@ Pod::Spec.new do |s|
   s.summary        = 'Schedules iOS Smart Arrival region monitoring for ThereYouGo.'
   s.description    = 'A narrow local Expo module for managed CLCircularRegion registration, observation recovery, and local reminder delivery.'
   s.author         = 'Victor Mejia'
-  s.homepage       = 'https://github.com/vvictorious/there-you-go'
+  s.homepage       = 'https://github.com/vvictorious/remindspot'
   s.platforms      = { :ios => '16.4' }
-  s.source         = { :git => 'https://github.com/vvictorious/there-you-go.git' }
+  s.source         = { :git => 'https://github.com/vvictorious/remindspot.git' }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
